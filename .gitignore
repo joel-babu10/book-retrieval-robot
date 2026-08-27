@@ -1,0 +1,12 @@
+**/test/
+**/train/
+**/valid/
+**/runs/
+**/*.pt
+**/__pycache__/
+**/*.pyc
+**/out.txt
+**/result_*.jpg
+**/README.dataset.txt
+**/README.roboflow.txt
+**/Book-spine-instance-segmentation-1/
