@@ -6,11 +6,17 @@ from OCR matching so detection can be tuned independently.
 """
 
 import os
+import sys
 from pathlib import Path
 import cv2
 import numpy as np
 import torch
 from PIL import Image
+
+# Ensure local sam3 repository is in sys.path if present
+SAM3_ROOT = Path(__file__).resolve().parent.parent / "sam3"
+if SAM3_ROOT.exists() and str(SAM3_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAM3_ROOT))
 
 TEXT_PROMPT = "book"
 CONF_THRESHOLD = 0.35
@@ -21,7 +27,31 @@ _model_sam3 = None
 _processor_sam3 = None
 
 
-def get_sam3(conf_threshold=CONF_THRESHOLD):
+YOLO_SCATTERED_PATH = r"C:\Users\joelv\runs\obb\runs\obb\scattered-train-2-3\weights\best.pt"
+SAM1_CHECKPOINT = r"sam_vit_b_01ec64.pth"
+
+_yolo_scattered_model = None
+_sam_predictor_fallback = None
+
+
+def get_yolo_scattered(verbose=True):
+    """Loads trained YOLO OBB book model (5.9 MB, ~35 ms inference)."""
+    global _yolo_scattered_model
+    if _yolo_scattered_model is not None:
+        return _yolo_scattered_model
+
+    if os.path.exists(YOLO_SCATTERED_PATH):
+        from ultralytics import YOLO
+        if verbose:
+            print(f"[Scattered] Loading trained Book YOLO OBB model ({Path(YOLO_SCATTERED_PATH).name})...", flush=True)
+        _yolo_scattered_model = YOLO(YOLO_SCATTERED_PATH)
+        if verbose:
+            print("[Scattered] Book YOLO OBB model ready.", flush=True)
+        return _yolo_scattered_model
+    return None
+
+
+def get_sam3(conf_threshold=CONF_THRESHOLD, verbose=True):
     """Lazy-load SAM 3 once, reused across calls. Prefers a local cached
     checkpoint over re-downloading from Hugging Face."""
     global _model_sam3, _processor_sam3
@@ -31,28 +61,47 @@ def get_sam3(conf_threshold=CONF_THRESHOLD):
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
 
-    print(f"[Scattered] Device: {DEVICE}", flush=True)
-    print("[Scattered] Loading SAM 3...", flush=True)
+    if verbose:
+        print(f"[Scattered] Device: {DEVICE}", flush=True)
+        print("[Scattered] Loading SAM 3...", flush=True)
 
     local_hf_ckpt = os.path.expanduser(
         "~/.cache/huggingface/hub/models--facebook--sam3/snapshots/"
         "3c879f39826c281e95690f02c7821c4de09afae7/sam3.pt"
     )
-    if os.path.exists(local_hf_ckpt):
-        print(f"[Scattered] Loading SAM 3 locally from: {local_hf_ckpt}", flush=True)
-        _model_sam3 = build_sam3_image_model(device=DEVICE, checkpoint_path=local_hf_ckpt, load_from_HF=False)
+    custom_ckpt = os.environ.get("SAM3_CHECKPOINT", None)
+    ckpt_to_use = None
+    if custom_ckpt and os.path.exists(custom_ckpt):
+        ckpt_to_use = custom_ckpt
+    elif os.path.exists(local_hf_ckpt):
+        ckpt_to_use = local_hf_ckpt
+
+    if ckpt_to_use:
+        if verbose:
+            print(f"[Scattered] Loading SAM 3 locally from: {ckpt_to_use}", flush=True)
+        _model_sam3 = build_sam3_image_model(device=DEVICE, checkpoint_path=ckpt_to_use, load_from_HF=False)
     else:
+        if verbose:
+            print("[Scattered] Loading SAM 3 from Hugging Face...", flush=True)
         _model_sam3 = build_sam3_image_model(device=DEVICE)
 
     _processor_sam3 = Sam3Processor(_model_sam3, device=DEVICE, confidence_threshold=conf_threshold)
-    print("[Scattered] SAM 3 ready.", flush=True)
+    if verbose:
+        print("[Scattered] SAM 3 ready.", flush=True)
     return _model_sam3, _processor_sam3
 
 
-def preload_scattered_model(conf_threshold=CONF_THRESHOLD):
-    """Force-load SAM 3 immediately — call from a background thread at
-    startup so it's ready by the time detection needs it."""
-    get_sam3(conf_threshold)
+def preload_scattered_model(conf_threshold=CONF_THRESHOLD, verbose=True, **kwargs):
+    """Preload scattered book detector in background thread."""
+    if os.environ.get("USE_SAM3", "0") == "1":
+        try:
+            get_sam3(conf_threshold=conf_threshold, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"[Scattered] SAM 3 preload warning: {e}", flush=True)
+            get_yolo_scattered(verbose=verbose)
+    else:
+        get_yolo_scattered(verbose=verbose)
 
 
 def _bbox_containment_ratio(rect_child, rect_parent):
@@ -169,61 +218,92 @@ def detect_books(image_path=None, image=None, pil_image=None, conf_threshold=CON
     else:
         raise ValueError("Must provide at least one of image_path, image, or pil_image to detect_books.")
 
-    model_sam3, processor_sam3 = get_sam3(conf_threshold)
     img_height, img_width = cv_image.shape[:2]
-
-    with torch.inference_mode():
-        autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if DEVICE == "cuda" else torch.autocast("cpu", enabled=False)
-        with autocast_ctx:
-            state = processor_sam3.set_image(pil_image)
-            state = processor_sam3.set_text_prompt(prompt=TEXT_PROMPT, state=state)
-
-    masks = state.get("masks", None)
-    scores = state.get("scores", None)
     raw_detections = []
+    use_sam3 = (os.environ.get("USE_SAM3", "0") == "1")
 
-    if masks is not None and scores is not None and len(scores) > 0:
-        for i in range(len(scores)):
-            conf = float(scores[i].item())
-            if conf < conf_threshold:
-                continue
+    if not use_sam3:
+        # Step [2]: Fast trained Book YOLO OBB model (~35 ms)
+        yolo_mod = get_yolo_scattered()
+        if yolo_mod is not None:
+            results = yolo_mod(cv_image, conf=conf_threshold, verbose=False)[0]
+            if results.obb is not None and len(results.obb) > 0:
+                for obb in results.obb:
+                    conf = float(obb.conf[0].item())
+                    corners = obb.xyxyxyxy[0].cpu().numpy()
 
-            m = masks[i]
-            if m.dim() == 3:
-                m = m.squeeze(0)
-            mask_np = m.cpu().numpy().astype(np.uint8) * 255
+                    rect = cv2.minAreaRect(corners.astype(np.float32))
+                    obb_corners = cv2.boxPoints(rect)
+                    (cx, cy), (w, h), angle = rect
 
-            contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                continue
-            largest = max(contours, key=cv2.contourArea)
+                    sorted_by_y = obb_corners[np.argsort(obb_corners[:, 1])]
+                    top_two = sorted_by_y[:2]
+                    top_edge_center_u = float(np.mean(top_two[:, 0]))
+                    top_edge_center_v = float(np.mean(top_two[:, 1]))
 
-            rect = cv2.minAreaRect(largest)
-            obb_corners = cv2.boxPoints(rect)
-            (cx, cy), (w, h), angle = rect
+                    raw_detections.append({
+                        "conf": conf,
+                        "mask_contour": corners.astype(np.int32),
+                        "obb_center": (cx, cy),
+                        "obb_size": (w, h),
+                        "obb_angle": angle,
+                        "obb_corners": obb_corners,
+                        "corners": obb_corners,
+                        "center": (cx, cy),
+                        "width_px": float(min(w, h)),
+                        "height_px": float(max(w, h)),
+                        "top_edge_center": (top_edge_center_u, top_edge_center_v),
+                    })
 
-            width_px = float(min(w, h))
-            height_px = float(max(w, h))
+    if not raw_detections and use_sam3:
+        # SAM 3 text prompt segmentation (if explicitly requested via USE_SAM3=1)
+        try:
+            model_sam3, processor_sam3 = get_sam3(conf_threshold)
+            with torch.inference_mode():
+                autocast_device = "cuda" if DEVICE == "cuda" else "cpu"
+                with torch.autocast(autocast_device, dtype=torch.bfloat16):
+                    state = processor_sam3.set_image(pil_image)
+                    state = processor_sam3.set_text_prompt(prompt=TEXT_PROMPT, state=state)
 
-            # Top edge midpoint for consistency with spine_pipeline
-            sorted_by_y = obb_corners[np.argsort(obb_corners[:, 1])]
-            top_two = sorted_by_y[:2]
-            top_edge_center_u = float(np.mean(top_two[:, 0]))
-            top_edge_center_v = float(np.mean(top_two[:, 1]))
+            masks = state.get("masks", None)
+            scores = state.get("scores", None)
+            if masks is not None and scores is not None and len(scores) > 0:
+                for i in range(len(scores)):
+                    conf = float(scores[i].item())
+                    if conf < conf_threshold:
+                        continue
+                    m = masks[i]
+                    if m.dim() == 3:
+                        m = m.squeeze(0)
+                    mask_np = m.cpu().numpy().astype(np.uint8) * 255
+                    contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if not contours:
+                        continue
+                    largest = max(contours, key=cv2.contourArea)
+                    rect = cv2.minAreaRect(largest)
+                    obb_corners = cv2.boxPoints(rect)
+                    (cx, cy), (w, h), angle = rect
 
-            raw_detections.append({
-                "conf": conf,
-                "mask_contour": largest,
-                "obb_center": (cx, cy),
-                "obb_size": (w, h),
-                "obb_angle": angle,
-                "obb_corners": obb_corners,
-                "corners": obb_corners,
-                "center": (cx, cy),
-                "width_px": width_px,
-                "height_px": height_px,
-                "top_edge_center": (top_edge_center_u, top_edge_center_v),
-            })
+                    sorted_by_y = obb_corners[np.argsort(obb_corners[:, 1])]
+                    top_two = sorted_by_y[:2]
+                    top_edge_center_u = float(np.mean(top_two[:, 0]))
+                    top_edge_center_v = float(np.mean(top_two[:, 1]))
+
+                    raw_detections.append({
+                        "conf": conf,
+                        "mask_contour": largest,
+                        "obb_center": (cx, cy),
+                        "obb_size": (w, h),
+                        "obb_angle": angle,
+                        "obb_corners": obb_corners,
+                        "corners": obb_corners,
+                        "center": (cx, cy),
+                        "width_px": float(min(w, h)),
+                        "height_px": float(max(w, h)),
+                        "top_edge_center": (top_edge_center_u, top_edge_center_v),
+                    })
+        except Exception as e:
+            print(f"[Scattered] SAM 3 error: {e}", flush=True)
 
     filtered = filter_book_detections(raw_detections, img_width, img_height)
     return cv_image, filtered

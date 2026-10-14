@@ -23,10 +23,101 @@ import threading
 from pathlib import Path
 from difflib import SequenceMatcher
 
+VOICE_AVAILABLE = False
 try:
+    try:
+        import pyaudio
+    except ImportError:
+        try:
+            import queue
+            import sounddevice as sd
+
+            class _PyAudioStreamShim:
+                def __init__(self, rate=16000, channels=1, device=None, frames_per_buffer=1024):
+                    self.queue = queue.Queue()
+                    self.rate = rate
+                    self.channels = channels
+                    def callback(indata, frames, time_info, status):
+                        self.queue.put(bytes(indata))
+                    self.stream = sd.RawInputStream(
+                        samplerate=rate,
+                        channels=channels,
+                        dtype='int16',
+                        device=device,
+                        blocksize=frames_per_buffer,
+                        callback=callback
+                    )
+                    self.stream.start()
+
+                def read(self, num_frames, exception_on_overflow=False):
+                    bytes_needed = num_frames * self.channels * 2
+                    data = bytearray()
+                    while len(data) < bytes_needed:
+                        data.extend(self.queue.get())
+                    return bytes(data[:bytes_needed])
+
+                def is_stopped(self):
+                    return not self.stream.active
+
+                def is_active(self):
+                    return self.stream.active
+
+                def stop_stream(self):
+                    if self.stream.active:
+                        self.stream.stop()
+
+                def close(self):
+                    self.stop_stream()
+                    self.stream.close()
+
+            class _PyAudioInstanceShim:
+                def get_default_input_device_info(self):
+                    default_in = sd.default.device[0]
+                    if default_in is None or default_in < 0:
+                        default_in = 0
+                    info = sd.query_devices(default_in)
+                    return {
+                        'index': default_in,
+                        'name': info['name'],
+                        'defaultSampleRate': info['default_samplerate'],
+                        'maxInputChannels': info['max_input_channels']
+                    }
+
+                def get_device_count(self):
+                    return len(sd.query_devices())
+
+                def get_device_info_by_index(self, index):
+                    info = sd.query_devices(index)
+                    return {
+                        'index': index,
+                        'name': info['name'],
+                        'defaultSampleRate': info['default_samplerate'],
+                        'maxInputChannels': info['max_input_channels']
+                    }
+
+                def open(self, rate=16000, channels=1, format=8, input=True, input_device_index=None, frames_per_buffer=1024, **kwargs):
+                    return _PyAudioStreamShim(rate=rate, channels=channels, device=input_device_index, frames_per_buffer=frames_per_buffer)
+
+                def get_sample_size(self, format):
+                    return 2
+
+                def terminate(self):
+                    pass
+
+            class _PyAudioModuleShim:
+                paInt16 = 8
+                paFloat32 = 1
+                PyAudio = _PyAudioInstanceShim
+                def get_sample_size(self, format):
+                    return 2
+
+            sys.modules['pyaudio'] = _PyAudioModuleShim()
+        except ImportError:
+            pass
+
     import speech_recognition as sr
     VOICE_AVAILABLE = True
-except ImportError:
+except Exception:
     VOICE_AVAILABLE = False
 
 # Catalog paths (OS-agnostic resolution)
@@ -64,6 +155,7 @@ def score_match(query, book):
     book_id = book.get("book_id", "").lower()
     title_lower = book.get("title", "").lower()
     author_lower = book.get("author", "").lower()
+    aliases = [a.lower() for a in book.get("aliases", [])]
 
     if query_lower == book_id:
         return 1.0
@@ -71,10 +163,16 @@ def score_match(query, book):
     if query_lower in title_lower or query_lower in author_lower:
         return 1.0
 
+    for alias in aliases:
+        if query_lower in alias or alias in query_lower:
+            return 1.0
+
     query_words = [w for w in query_lower.split() if len(w) > 1]
     title_words = [w for w in title_lower.split() if len(w) > 1]
     author_words = [w for w in author_lower.split() if len(w) > 1]
     all_target_words = title_words + author_words
+    for a in aliases:
+        all_target_words.extend([w for w in a.split() if len(w) > 1])
 
     matched_words = 0
     for qw in query_words:
@@ -84,30 +182,47 @@ def score_match(query, book):
 
     title_ratio = SequenceMatcher(None, query_lower, title_lower).ratio()
     author_ratio = SequenceMatcher(None, query_lower, author_lower).ratio()
-    fuzzy_ratio = max(title_ratio, author_ratio)
+    alias_ratio = max([SequenceMatcher(None, query_lower, a).ratio() for a in aliases], default=0.0)
+    fuzzy_ratio = max(title_ratio, author_ratio, alias_ratio)
 
     if token_score == 0.0:
-        return fuzzy_ratio * 0.5
+        return 0.0
 
     return max(token_score, fuzzy_ratio)
 
 
-def match_query(query, catalog=None, threshold=0.35):
+def match_query(query, catalog=None, threshold=0.50):
     if catalog is None:
         catalog = load_catalog()
     if not query or not query.strip():
         return None, 0.0
     if not catalog:
-        return None, 0.0
+        return {"book_id": "CUSTOM", "title": query.strip(), "call_number": "N/A", "shelf_level": "1", "order_position": "1", "rfid_info": "N/A"}, 1.0
 
     scored = [(score_match(query, book), book) for book in catalog]
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_book = scored[0]
+
+    # If confidence in catalog match is low, preserve the raw query as title
     if best_score < threshold:
-        return None, best_score
+        return {
+            "book_id": "CUSTOM",
+            "title": query.strip(),
+            "call_number": "N/A",
+            "shelf_level": "1",
+            "order_position": "1",
+            "rfid_info": "N/A",
+            "author": "",
+            "edition": "",
+            "aliases": [],
+        }, 1.0
+
     output = {
         "book_id": best_book.get("book_id", "N/A"),
         "title": best_book.get("title", query.strip()),
+        "author": best_book.get("author", ""),
+        "edition": best_book.get("edition", ""),
+        "aliases": best_book.get("aliases", []),
         "call_number": best_book.get("call_number", "N/A"),
         "shelf_level": best_book.get("shelf_level", "1"),
         "order_position": best_book.get("order_position", "1"),
@@ -235,9 +350,17 @@ def get_book_query(catalog_path=None, threshold=0.35, verbose=True, allow_raw_fa
     query, source = get_query()
 
     if not query:
-        if verbose:
-            log("\nNo input captured. Try again.")
-        return None
+        if source == "text":
+            if verbose:
+                log("Enter book title, author, or book ID:")
+            try:
+                query = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                query = ""
+        if not query:
+            if verbose:
+                log("\nNo input captured. Try again.")
+            return None
 
     result, score = match_query(query, catalog=catalog, threshold=threshold)
 
@@ -264,6 +387,45 @@ def get_book_query(catalog_path=None, threshold=0.35, verbose=True, allow_raw_fa
     result["match_score"] = score
     result["input_source"] = source
     return result
+
+
+def get_mode_selection(default="spine", verbose=True):
+    """
+    Prompts the user to select the arrangement mode:
+      1. spine     - stacked spines on shelf (default)
+      2. scattered - books lying flat/scattered on surface
+      3. mixed     - scan both and keep higher-confidence match
+
+    Returns "spine", "scattered", or "mixed".
+    """
+    if verbose:
+        log("\nSelect arrangement mode:")
+        log("  [1] spine     - Spines aligned on shelf (default)")
+        log("  [2] scattered - Books flat/scattered on surface")
+        log("  [3] mixed     - Run both pipelines, pick best match")
+        try:
+            choice = input("Enter choice (1-3 or mode name, default 1): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = ""
+    else:
+        choice = ""
+
+    if choice in ("1", "spine", "s"):
+        mode = "spine"
+    elif choice in ("2", "scattered", "sc"):
+        mode = "scattered"
+    elif choice in ("3", "mixed", "m"):
+        mode = "mixed"
+    elif not choice:
+        mode = default
+    else:
+        if verbose:
+            log(f"Invalid mode choice '{choice}'. Defaulting to '{default}'.")
+        mode = default
+
+    if verbose:
+        log(f"Arrangement mode set to: {mode}\n")
+    return mode
 
 
 def run():

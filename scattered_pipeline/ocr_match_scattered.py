@@ -21,20 +21,26 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _ocr_reader = None
 
 
-def get_reader(languages=("ch_sim", "en")):
-    """Lazy-load EasyOCR once, reused across calls."""
-    global _ocr_reader
-    if _ocr_reader is None:
-        print(f"[Scattered OCR] Loading EasyOCR {languages}...", flush=True)
-        _ocr_reader = easyocr.Reader(list(languages), gpu=(DEVICE == "cuda"))
-        print("[Scattered OCR] EasyOCR ready.", flush=True)
-    return _ocr_reader
+def get_reader(languages=("ch_sim", "en"), verbose=True):
+    """Lazy-load EasyOCR once via shared singleton, reused across calls."""
+    try:
+        from shared.ocr_reader import get_shared_ocr_reader
+        return get_shared_ocr_reader(languages=languages, verbose=verbose)
+    except Exception:
+        global _ocr_reader
+        if _ocr_reader is None:
+            if verbose:
+                print(f"[Scattered OCR] Loading EasyOCR {languages}...", flush=True)
+            _ocr_reader = easyocr.Reader(list(languages), gpu=(DEVICE == "cuda"))
+            if verbose:
+                print("[Scattered OCR] EasyOCR ready.", flush=True)
+        return _ocr_reader
 
 
-def preload_scattered_reader(languages=("ch_sim", "en")):
+def preload_scattered_reader(languages=("ch_sim", "en"), verbose=False, **kwargs):
     """Force-load the scattered OCR reader immediately — call from a
     background thread at startup so it's ready by the time OCR needs it."""
-    get_reader(languages)
+    get_reader(languages, verbose=verbose)
 
 
 def warp_obb_to_upright(img, corners):
@@ -62,58 +68,18 @@ def warp_obb_to_upright(img, corners):
     return cv2.warpPerspective(img, M, (out_w, out_h))
 
 
-def compute_title_similarity(ocr_text, query_title):
-    """
-    Robust title similarity matching supporting English & Chinese:
-    1. Exact substring match
-    2. Word token set containment
-    3. Word overlap ratio
-    4. Sliding window substring ratio (prevents long cover text from diluting title score)
-    5. SequenceMatcher full ratio
-    """
-    if not ocr_text or not query_title:
-        return 0.0
-
-    text_lower = ocr_text.lower().strip()
-    query_lower = query_title.lower().strip()
-
-    if query_lower in text_lower:
-        return 1.0
-
-    query_words = set(query_lower.split())
-    text_words = set(text_lower.split())
-    if query_words and query_words.issubset(text_words):
-        return 1.0
-
-    word_ratio = 0.0
-    if query_words:
-        matched = sum(1 for w in query_words if any(w in tw for tw in text_words))
-        word_ratio = matched / len(query_words)
-
-    full_ratio = SequenceMatcher(None, text_lower, query_lower).ratio()
-
-    window_size = len(query_lower)
-    best_window = 0.0
-    if len(text_lower) >= window_size:
-        for i in range(len(text_lower) - window_size + 1):
-            chunk = text_lower[i:i + window_size]
-            r = SequenceMatcher(None, chunk, query_lower).ratio()
-            if r > best_window:
-                best_window = r
-
-    return max(full_ratio, word_ratio, best_window)
-
+from shared.ocr_reader import compute_title_similarity
 
 # Alias for compatibility with spine pipeline
 title_similarity = compute_title_similarity
 
 
-def ocr_best_match(crop, query_title, reader=None, early_exit_score=0.85):
+def ocr_best_match(crop, query_title, reader=None, early_exit_score=0.80):
     """
-    Tries OCR at rotations (cover orientation is unconstrained),
-    resizing large crops first for speed, ordering rotation attempts
-    smartly based on aspect ratio, and returning the best (score, text) pair.
-    Exits early once a strong match is found.
+    Fast orientation-aware OCR matching:
+    1. Resizes crop to max_dim 500 for optimal PP-OCR speed (~3x faster than 900px).
+    2. Tests primary orientations (0° and 90° CW) leveraging RapidOCR's internal 180° cls.
+    3. Exits immediately once a strong match (>= 0.80) is found without testing remaining rotations.
     """
     if crop is None or crop.size == 0:
         return 0.0, ""
@@ -121,35 +87,26 @@ def ocr_best_match(crop, query_title, reader=None, early_exit_score=0.85):
     reader = reader or get_reader()
 
     max_dim = max(crop.shape[:2])
-    if max_dim > 640:
-        scale = 640.0 / max_dim
+    if max_dim > 500:
+        scale = 500.0 / max_dim
         crop_resized = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
     else:
         crop_resized = crop
 
-    # Order rotations intelligently based on aspect ratio
+    # Primary orientations (horizontal vs vertical)
     h, w = crop_resized.shape[:2]
     if w >= h:
-        # Landscape crop: check 0 and 180 degrees first
-        rotations = [
-            crop_resized,
-            cv2.rotate(crop_resized, cv2.ROTATE_180),
-            cv2.rotate(crop_resized, cv2.ROTATE_90_CLOCKWISE),
-            cv2.rotate(crop_resized, cv2.ROTATE_90_COUNTERCLOCKWISE),
-        ]
+        primary_rots = [crop_resized, cv2.rotate(crop_resized, cv2.ROTATE_90_CLOCKWISE)]
+        secondary_rots = [cv2.rotate(crop_resized, cv2.ROTATE_180), cv2.rotate(crop_resized, cv2.ROTATE_90_COUNTERCLOCKWISE)]
     else:
-        # Portrait crop: check 0, 90 CW, 90 CCW, 180 degrees
-        rotations = [
-            crop_resized,
-            cv2.rotate(crop_resized, cv2.ROTATE_90_CLOCKWISE),
-            cv2.rotate(crop_resized, cv2.ROTATE_90_COUNTERCLOCKWISE),
-            cv2.rotate(crop_resized, cv2.ROTATE_180),
-        ]
+        primary_rots = [cv2.rotate(crop_resized, cv2.ROTATE_90_CLOCKWISE), crop_resized]
+        secondary_rots = [cv2.rotate(crop_resized, cv2.ROTATE_90_COUNTERCLOCKWISE), cv2.rotate(crop_resized, cv2.ROTATE_180)]
 
     best_score = 0.0
     best_text = ""
 
-    for rot_crop in rotations:
+    # Phase 1: Test primary orientations
+    for rot_crop in primary_rots:
         try:
             results = reader.readtext(rot_crop, detail=0)
         except Exception:
@@ -163,7 +120,25 @@ def ocr_best_match(crop, query_title, reader=None, early_exit_score=0.85):
             best_score = score
             best_text = read_text
             if best_score >= early_exit_score:
-                break
+                return best_score, best_text
+
+    # Phase 2: Fallback to secondary orientations only if no candidate reached 0.60
+    if best_score < 0.60:
+        for rot_crop in secondary_rots:
+            try:
+                results = reader.readtext(rot_crop, detail=0)
+            except Exception:
+                continue
+            read_text = " ".join(results).strip()
+            if not read_text:
+                continue
+
+            score = compute_title_similarity(read_text, query_title)
+            if score > best_score:
+                best_score = score
+                best_text = read_text
+                if best_score >= early_exit_score:
+                    break
 
     return best_score, best_text
 

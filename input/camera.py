@@ -36,7 +36,7 @@ class RealSenseCamera:
         self.align = None
         self._started = False
 
-    def start(self):
+    def start(self, verbose=False):
         if self._started:
             return
 
