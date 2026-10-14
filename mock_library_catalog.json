@@ -1,0 +1,161 @@
+[
+  {
+    "book_id": "B2001",
+    "title": "Concepts of Database Management",
+    "author": "Philip J. Pratt, Joseph J. Adamski",
+    "edition": "Sixth Edition",
+    "aliases": ["Concepts of Database Management", "Database Management", "DATABASE MANAGEMENT", "Pratt", "Adamski", "Philip J. Pratt", "Joseph J. Adamski", "Sixth Edition"],
+    "call_number": "005.74 PRA",
+    "shelf_level": "1",
+    "order_position": "1",
+    "rfid_tag": "E200341201234520"
+  },
+  {
+    "book_id": "B2002",
+    "title": "Linear Algebra with Applications",
+    "author": "Otto Bretscher",
+    "edition": "Fourth Edition",
+    "publisher": "Pearson International Edition",
+    "aliases": ["Linear Algebra with Applications", "Linear Algebra", "Otto Bretscher", "Bretscher", "Pearson International Edition", "Pearson", "Fourth Edition", "4th Edition"],
+    "call_number": "512.5 BRE",
+    "shelf_level": "1",
+    "order_position": "2",
+    "rfid_tag": "E200341201234521"
+  },
+  {
+    "book_id": "B2003",
+    "title": "JavaServer Pages",
+    "author": "Pekowsky",
+    "edition": "Standard Edition",
+    "aliases": ["JavaServer Pages", "JSP", "Pekowsky", "Hans Bergsten"],
+    "call_number": "005.133 BER",
+    "shelf_level": "1",
+    "order_position": "3",
+    "rfid_tag": "E200341201234522"
+  },
+  {
+    "book_id": "B2004",
+    "title": "Probability, Statistics, and Random Processes for Electrical Engineering",
+    "author": "Alberto Leon-Garcia",
+    "edition": "Third Edition",
+    "aliases": ["Probability, Statistics, and Random Processes for Electrical Engineering", "Probability and Random Processes", "Probability", "Electrical Engineering", "Leon-Garcia", "Alberto Leon-Garcia", "Third Edition", "3rd Edition"],
+    "call_number": "621.380 LEO",
+    "shelf_level": "1",
+    "order_position": "4",
+    "rfid_tag": "E200341201234523"
+  },
+  {
+    "book_id": "B2005",
+    "title": "Linear Algebra with Applications",
+    "author": "Steven J. Leon",
+    "edition": "Pearson Edition",
+    "publisher": "Pearson",
+    "aliases": ["Linear Algebra with Applications", "線性代數", "代數", "Steven J. Leon", "Steven Leon", "Leon", "Pearson"],
+    "call_number": "512.5 LEO",
+    "shelf_level": "1",
+    "order_position": "5",
+    "rfid_tag": "E200341201234524"
+  },
+  {
+    "book_id": "B2006",
+    "title": "Linear Algebra with Applications",
+    "author": "W. Keith Nicholson",
+    "edition": "Seventh Edition (7e)",
+    "publisher": "McGraw-Hill",
+    "aliases": ["Linear Algebra with Applications", "線性代數", "Nicholson", "W. Keith Nicholson", "7e", "7th Edition", "McGraw-Hill"],
+    "call_number": "512.5 NIC",
+    "shelf_level": "1",
+    "order_position": "6",
+    "rfid_tag": "E200341201234525"
+  },
+  {
+    "book_id": "B1001",
+    "title": "Harry Potter and the Sorcerer's Stone",
+    "author": "J.K. Rowling",
+    "call_number": "FIC ROW",
+    "shelf_level": "1",
+    "order_position": "3",
+    "rfid_tag": "E200341201234501"
+  },
+  {
+    "book_id": "B1002",
+    "title": "The Great Gatsby",
+    "author": "F. Scott Fitzgerald",
+    "call_number": "FIC FIT",
+    "shelf_level": "1",
+    "order_position": "7",
+    "rfid_tag": "E200341201234502"
+  },
+  {
+    "book_id": "B1003",
+    "title": "To Kill a Mockingbird",
+    "author": "Harper Lee",
+    "call_number": "FIC LEE",
+    "shelf_level": "1",
+    "order_position": "12",
+    "rfid_tag": "E200341201234503"
+  },
+  {
+    "book_id": "B1004",
+    "title": "The Hobbit",
+    "author": "J.R.R. Tolkien",
+    "call_number": "FIC TOL",
+    "shelf_level": "2",
+    "order_position": "2",
+    "rfid_tag": "E200341201234504"
+  },
+  {
+    "book_id": "B1005",
+    "title": "Pride and Prejudice",
+    "author": "Jane Austen",
+    "call_number": "FIC AUS",
+    "shelf_level": "2",
+    "order_position": "5",
+    "rfid_tag": "E200341201234505"
+  },
+  {
+    "book_id": "B1006",
+    "title": "The Da Vinci Code",
+    "author": "Dan Brown",
+    "call_number": "FIC BRO",
+    "shelf_level": "2",
+    "order_position": "9",
+    "rfid_tag": "E200341201234506"
+  },
+  {
+    "book_id": "B1007",
+    "title": "A Brief History of Time",
+    "author": "Stephen Hawking",
+    "call_number": "530 HAW",
+    "shelf_level": "3",
+    "order_position": "1",
+    "rfid_tag": "E200341201234507"
+  },
+  {
+    "book_id": "B1008",
+    "title": "Sapiens",
+    "author": "Yuval Noah Harari",
+    "call_number": "909 HAR",
+    "shelf_level": "3",
+    "order_position": "4",
+    "rfid_tag": "E200341201234508"
+  },
+  {
+    "book_id": "B1009",
+    "title": "Atomic Habits",
+    "author": "James Clear",
+    "call_number": "158.1 CLE",
+    "shelf_level": "3",
+    "order_position": "8",
+    "rfid_tag": "E200341201234509"
+  },
+  {
+    "book_id": "B1010",
+    "title": "The Alchemist",
+    "author": "Paulo Coelho",
+    "call_number": "FIC COE",
+    "shelf_level": "1",
+    "order_position": "10",
+    "rfid_tag": "E200341201234510"
+  }
+]

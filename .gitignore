@@ -1,16 +1,53 @@
-# Ignore everything
-*
+# =====================================================================
+# Git Ignore for Book Retrieval Robot
+# =====================================================================
 
-# Keep .gitignore
-!.gitignore
-
-# Keep input
-!input/
-!input/**
-
-# Keep spine_pipeline
-!spine_pipeline/
-!spine_pipeline/**
-
-# Never keep Python cache
+# --- Python & Bytecode ---
 __pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# --- Virtual Environments ---
+venv/
+env/
+ENV/
+.env
+
+# --- Archive, Run Dumps, Scratch & 3rd-Party ---
+archieve/
+scratch/
+saved_runs/
+runs/
+sam3/
+*.log
+out.txt
+
+# --- Large Weights & Checkpoints (>10MB) ---
+*.pth
+*.pt
+*.onnx
+*.engine
+
+# Keep the lightweight trained arrangement classifier
+!models/mode_classifier.pt
+
+# --- Generated Media & Output Images ---
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.mp4
+*.avi
+
+# --- IDE & Operating System ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
