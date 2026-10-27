@@ -56,6 +56,17 @@ def parse_args():
         action="store_true",
         help="Interactively prompt for arrangement mode at startup",
     )
+    parser.add_argument(
+        "--pick", "-p",
+        action="store_true",
+        default=True,
+        help="Execute Dobot pick sequence on detected book target (default: True)",
+    )
+    parser.add_argument(
+        "--no-pick",
+        action="store_true",
+        help="Detect and localize target without executing physical robot pick",
+    )
     # Parse only known args to safely allow extra runner flags
     args, _ = parser.parse_known_args()
     mode_map = {"1": "auto", "2": "spine", "3": "scattered", "4": "mixed"}
@@ -159,7 +170,16 @@ def run():
     from shared.display_utils import print_target_summary
     print_target_summary(target)
 
-    # Ready for Step 6: Coordinate Transform from Optical Frame to Arm Base Frame
+    # Step 6: Coordinate Transform from Optical Frame to Arm Base Frame & Physical Execution
+    should_pick = args.pick and not args.no_pick
+    if should_pick and target:
+        pick_xyz_m = target.get("xyz_pick_camera_frame") or target.get("xyz_center_camera_frame")
+        pick_angle = target.get("pick_edge_angle_deg")
+        is_spine = (mode == "spine")
+        from robot.dobot_controller import get_dobot_controller
+        dobot = get_dobot_controller()
+        dobot.execute_pick_sequence(pick_xyz_m, grasp_angle_deg=pick_angle, is_spine=is_spine)
+
     return target
 
 
