@@ -251,7 +251,7 @@ def main():
         R_current = np.array([[ 0.394764,  0.0, -0.908681],
                               [ 0.852790,  0.0,  0.064282],
                               [ 0.0,      -0.980158, -0.020429]], dtype=float)
-        t_current = np.array([295.236, 345.090, 118.218], dtype=float)
+        t_current = np.array([288.209, 356.924, 116.693], dtype=float)
         c2r.save(R_current, t_current)
     else:
         R_current, t_current = c2r.load()

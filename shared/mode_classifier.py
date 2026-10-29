@@ -79,6 +79,7 @@ def classify_mode(cv_image, verbose=True):
     if cv_image is None or cv_image.size == 0:
         return "spine", 0.50
 
+    img_h, img_w = cv_image.shape[:2]
     upright_books = []
     flat_books = []
 
@@ -96,21 +97,18 @@ def classify_mode(cv_image, verbose=True):
             cx, cy = d["center"]
             y_top = float(np.min(c[:, 1]))
 
-            # Upright shelf book criteria:
-            # - Must be tall in image (dy >= 350 px in 1080p)
-            # - Must reach up into the shelf elevation (y_top < 550 px)
-            # - Must have vertical span much larger than horizontal span (dy >= 1.8 * dx)
-            # - Must have high aspect ratio (aspect >= 2.0)
-            is_tall_shelf = (dy >= 350.0 and y_top < 550.0 and dy >= 1.8 * dx and aspect >= 2.0)
+            # Normalized upright criteria (standing book):
+            # - Taller than wide: dy >= 1.30 * dx
+            # - Significant vertical height: dy >= (0.25 * img_h)
+            # - Reaches into vertical scene: y_top < (0.75 * img_h)
+            is_upright = (dy >= 1.30 * dx and dy >= (0.25 * img_h) and y_top < (0.75 * img_h))
 
             # Flat surface book criteria:
-            # - Horizontal span wider than vertical span (dx >= 1.15 * dy)
-            # - Wide cover face visible (w_box >= 170 px and aspect <= 2.2)
-            # - Desk surface location (cy > 750 or y_top > 550) with dy < 350
-            # - Any book not meeting strict upright shelf criteria
-            is_flat_desk = (dx >= 1.15 * dy) or (w_box >= 170.0 and aspect <= 2.2) or (cy > 750.0 and dy < 350.0) or (y_top > 550.0 and not is_tall_shelf)
+            # - Horizontal span wider than vertical span: dx >= 1.15 * dy
+            # - Or wide cover: aspect <= 1.3 and not is_upright
+            is_flat = (dx >= 1.15 * dy) or (not is_upright and aspect <= 1.3 and w_box >= (0.15 * img_w))
 
-            if is_tall_shelf and not is_flat_desk:
+            if is_upright and not is_flat:
                 upright_books.append(d)
             else:
                 flat_books.append(d)
@@ -130,25 +128,29 @@ def classify_mode(cv_image, verbose=True):
             cx, cy = d["center"]
             y_top = float(np.min(c[:, 1]))
 
-            # A real shelf spine is a tall vertical column reaching shelf height
-            if dy >= 350.0 and dy >= 2.5 * dx and y_top < 550.0 and cy < 820.0:
-                # Must not overlap or be inside any detected flat book
+            # Upright spine criteria (normalized):
+            is_upright_spine = (dy >= 1.35 * dx and dy >= (0.25 * img_h) and y_top < (0.75 * img_h))
+            if is_upright_spine:
+                # Must not be a sub-slice of a confirmed horizontal flat book
                 overlap_flat = False
                 for fb in flat_books:
                     fc = fb["corners"]
-                    fcx, fcy = fb["center"]
-                    if np.hypot(cx - fcx, cy - fcy) < 160.0:
-                        overlap_flat = True
-                        break
-                    if cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(cx), float(cy)), False) >= 0:
-                        overlap_flat = True
-                        break
+                    fdx = float(np.ptp(fc[:, 0]))
+                    fdy = float(np.ptp(fc[:, 1]))
+                    if fdx >= 1.20 * fdy:
+                        fcx, fcy = fb["center"]
+                        if np.hypot(cx - fcx, cy - fcy) < (0.18 * img_w):
+                            overlap_flat = True
+                            break
+                        if cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(cx), float(cy)), False) >= 0:
+                            overlap_flat = True
+                            break
 
                 # Must not duplicate an already counted upright book
                 overlap_upright = False
                 for ub in upright_books:
                     ucx, ucy = ub["center"]
-                    if np.hypot(cx - ucx, cy - ucy) < 140.0:
+                    if np.hypot(cx - ucx, cy - ucy) < (0.15 * img_w):
                         overlap_upright = True
                         break
 

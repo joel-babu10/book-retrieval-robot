@@ -144,9 +144,9 @@ class DobotController:
         if np.max(np.abs([xc, yc, zc])) < 5.0:
             xc, yc, zc = xc * 1000.0, yc * 1000.0, zc * 1000.0
 
-        xr = 0.394764 * xc - 0.908681 * zc + 295.236
-        yr = 0.852790 * xc + 0.064282 * zc + 345.090
-        zr = -0.980158 * yc - 0.020429 * zc + 118.218
+        xr = 0.394764 * xc - 0.908681 * zc + 288.209
+        yr = 0.852790 * xc + 0.064282 * zc + 356.924
+        zr = -0.980158 * yc - 0.020429 * zc + 116.693
         return np.array([xr, yr, zr])
 
     def execute_pick_sequence(self, target_xyz_m, grasp_angle_deg=None, is_spine=False, update_ui=None):

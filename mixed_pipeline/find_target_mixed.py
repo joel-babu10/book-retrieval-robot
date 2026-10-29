@@ -147,23 +147,18 @@ def _is_flat_desk_target(t):
         w = float(min(t.get("width_px", dx), t.get("height_px", dy)))
         h = float(max(t.get("width_px", dx), t.get("height_px", dy)))
         aspect = h / max(w, 1.0)
-        cy = float(t.get("center", (0, 0))[1])
-        y_top = float(np.min(c[:, 1]))
 
-        # Horizontal book across desk
+        # Horizontal book across desk: horizontal span is noticeably larger than vertical span
         if dx >= 1.15 * dy:
             return True
-        # Wide cover face visible
-        if w >= 170.0 and aspect <= 2.2:
-            return True
-        # Desk surface location without tall shelf height
-        if (cy > 750.0 or y_top > 550.0) and dy < 350.0:
+        # Wide cover face without vertical height
+        if aspect <= 1.3 and dx >= dy:
             return True
     return False
 
 
 def _is_upright_shelf_target(t):
-    """Checks if a target detection is an upright book/spine on a shelf."""
+    """Checks if a target detection is an upright standing book/spine (vertical span)."""
     if not t:
         return False
     corners = t.get("corners")
@@ -173,14 +168,8 @@ def _is_upright_shelf_target(t):
         c = np.asarray(corners)
         dx = float(np.ptp(c[:, 0]))
         dy = float(np.ptp(c[:, 1]))
-        w = float(min(t.get("width_px", dx), t.get("height_px", dy)))
-        h = float(max(t.get("width_px", dx), t.get("height_px", dy)))
-        aspect = h / max(w, 1.0)
-        y_top = float(np.min(c[:, 1]))
-        cy = float(t.get("center", (0, 0))[1])
-
-        # Tall vertical column reaching shelf height
-        if dy >= 350.0 and y_top < 550.0 and dy >= 1.8 * dx and aspect >= 2.0 and cy < 820.0:
+        # Taller than wide: vertical upright standing book
+        if dy >= 1.30 * dx:
             return True
     return False
 
