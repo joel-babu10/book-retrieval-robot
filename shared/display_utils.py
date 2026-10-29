@@ -29,8 +29,9 @@ def print_target_summary(target, prefix=""):
 
     # 3D coordinates
     xyz_str = ""
-    cx_m, cy_m, cz_m = None, None, None
-    center_xyz = target.get("xyz_center_camera_frame") or target.get("xyz_camera_frame")
+    center_xyz = target.get("xyz_center_camera_frame")
+    if center_xyz is None:
+        center_xyz = target.get("xyz_camera_frame")
     if center_xyz is not None:
         cx_m, cy_m, cz_m = center_xyz
         xyz_str = f"({cx_m:.3f}, {cy_m:.3f}, {cz_m:.3f}) m"
@@ -41,7 +42,9 @@ def print_target_summary(target, prefix=""):
     # Pick edge coordinates
     pick_u = target.get("top_edge_center_u")
     pick_v = target.get("top_edge_center_v")
-    pick_xyz = target.get("xyz_pick_camera_frame") or center_xyz
+    pick_xyz = target.get("xyz_pick_camera_frame")
+    if pick_xyz is None:
+        pick_xyz = center_xyz
     pick_angle = target.get("pick_edge_angle_deg")
     if pick_angle is None:
         pick_angle = angle

@@ -6,7 +6,6 @@ Automatically classifies camera RGB frame into "spine" vs "scattered"
 in ~2ms so the pipeline loads/uses ONLY the needed specialized OBB model.
 """
 
-import os
 from pathlib import Path
 import cv2
 import numpy as np
@@ -83,73 +82,82 @@ def classify_mode(cv_image, verbose=True):
     tall_spines = []
     flat_books = []
 
-    # 1. Fast detection checks on 640px resized frame (~15 ms total on GPU)
-    h, w = cv_image.shape[:2]
-    if max(h, w) > 640:
-        scale = 640.0 / max(h, w)
-        img_check = cv2.resize(cv_image, (int(w * scale), int(h * scale)))
-    else:
-        img_check = cv_image
+    # 1. Detection checks on camera frame
+    img_check = cv_image
 
-    try:
-        from scattered_pipeline.detect_scattered import detect_books
-        _, sc_dets = detect_books(image=img_check, conf_threshold=0.40)
-        flat_books = [
-            d for d in sc_dets
-            if ((d['height_px'] / max(d['width_px'], 1.0)) < 2.5)
-        ]
-    except Exception as e:
-        if verbose:
-            print(f"[Mode Classifier] Scattered check error: {e}", flush=True)
-
+    # 1a. Detect shelf spines first
+    tall_spines = []
     try:
         from spine_pipeline.detect_spine import detect_spines
-        _, spine_dets = detect_spines(image=img_check, conf_threshold=0.45)
-        tall_spines = []
+        _, spine_dets = detect_spines(image=img_check, conf_threshold=0.25)
         for d in spine_dets:
             c = d["corners"]
             w_ext = float(np.ptp(c[:, 0]))
             h_ext = float(np.ptp(c[:, 1]))
-            # A true shelf spine MUST stand vertically (height > 1.5 * width)
-            # Horizontal page edges of flat books have width > height and are NOT shelf spines
-            if h_ext > 1.5 * w_ext and h_ext >= 60.0:
-                # Also ensure this spine candidate does NOT sit inside a detected flat book
-                sp_cx, sp_cy = d["center"]
-                inside_flat = False
-                for fb in flat_books:
-                    fc = fb.get("obb_corners")
-                    if fc is not None:
-                        if cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(sp_cx), float(sp_cy)), False) >= 0:
-                            inside_flat = True
-                            break
-                if not inside_flat:
-                    tall_spines.append(d)
+            # Shelf spines are vertically oriented (height > 1.10 * width)
+            if h_ext > 1.10 * w_ext and h_ext >= 50.0:
+                tall_spines.append(d)
     except Exception as e:
         if verbose:
             print(f"[Mode Classifier] Spine check error: {e}", flush=True)
 
+    # 1b. Detect books and categorize upright vs flat
+    upright_books = []
+    flat_books = []
+    try:
+        from scattered_pipeline.detect_scattered import detect_books
+        _, sc_dets = detect_books(image=img_check, conf_threshold=0.35)
+        for d in sc_dets:
+            w_box = float(min(d['width_px'], d['height_px']))
+            h_box = float(max(d['width_px'], d['height_px']))
+            aspect = h_box / max(w_box, 1.0)
+            ang = abs(float(d.get('obb_angle', 0.0)))
+            is_upright = (aspect >= 1.5) or (ang <= 30.0 or ang >= 150.0 or abs(ang - 90.0) <= 20.0)
+
+            # Check if this book candidate overlaps an already identified shelf spine
+            sp_cx, sp_cy = d["center"]
+            overlap = False
+            for sp in tall_spines:
+                scx, scy = sp["center"]
+                if np.hypot(sp_cx - scx, sp_cy - scy) < 150.0:
+                    overlap = True
+                    break
+                fc = d.get("obb_corners")
+                if fc is not None and cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(scx), float(scy)), False) >= 0:
+                    overlap = True
+                    break
+
+            if overlap or is_upright:
+                upright_books.append(d)
+            else:
+                flat_books.append(d)
+    except Exception as e:
+        if verbose:
+            print(f"[Mode Classifier] Scattered check error: {e}", flush=True)
+
     # 2. Arrangement determination
     n_spines = len(tall_spines)
+    n_upright = len(upright_books)
     n_scattered = len(flat_books)
 
-    # Mixed scene: both vertical shelf spines and flat surface books present
-    if n_spines >= 1 and n_scattered >= 1:
-        mode = "mixed"
-        conf = 0.98
-        if verbose:
-            print(f"[Mode Classifier] Detected {n_spines} upright shelf spine(s) AND {n_scattered} flat book(s). Scene is MIXED -> Mode set to: 'MIXED'", flush=True)
-        return mode, conf
+    # When vertical shelf spines or upright standing books are present, scene is SPINE arrangement
+    if n_spines >= 1 or n_upright >= 1:
+        total_standing = max(n_spines, n_upright)
+        if n_scattered >= 2 and n_scattered > total_standing:
+            mode = "mixed"
+            conf = 0.90
+            if verbose:
+                print(f"[Mode Classifier] Detected {total_standing} upright book/spine(s) AND {n_scattered} flat surface book(s). Scene is MIXED -> Mode set to: 'MIXED'", flush=True)
+            return mode, conf
+        else:
+            mode = "spine"
+            conf = 0.95
+            if verbose:
+                print(f"[Mode Classifier] Detected {total_standing} upright shelf book/spine(s). Mode set to: 'SPINE'", flush=True)
+            return mode, conf
 
-    # Shelf-only scene
-    if n_spines >= 1 and n_scattered == 0:
-        mode = "spine"
-        conf = 0.95
-        if verbose:
-            print(f"[Mode Classifier] Detected {n_spines} vertical shelf spine(s) and 0 flat books. Mode set to: 'SPINE'", flush=True)
-        return mode, conf
-
-    # Desk-only scattered scene
-    if n_spines == 0 and n_scattered >= 1:
+    # Desk-only scattered scene (no spines or upright books, only flat books)
+    if n_scattered >= 1:
         mode = "scattered"
         conf = 0.95
         if verbose:
@@ -166,7 +174,7 @@ def classify_mode(cv_image, verbose=True):
             if verbose:
                 print(f"[Mode Classifier] Geometry inconclusive. Tiny classifier predicts: '{top_class.upper()}' (conf: {conf:.2f})", flush=True)
             return top_class, conf
-        except Exception as e:
+        except Exception:
             pass
 
     mode, conf = _heuristic_mode_fallback(cv_image)

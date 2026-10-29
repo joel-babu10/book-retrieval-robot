@@ -15,10 +15,10 @@ import pyrealsense2 as rs
 
 DEFAULT_COLOR_WIDTH = 1920
 DEFAULT_COLOR_HEIGHT = 1080
-DEFAULT_DEPTH_WIDTH = 1280
-DEFAULT_DEPTH_HEIGHT = 720
+DEFAULT_DEPTH_WIDTH = 640
+DEFAULT_DEPTH_HEIGHT = 480
 DEFAULT_FPS = 30
-DEFAULT_WARMUP_FRAMES = 30  # Allow auto-exposure & white balance to settle fully
+DEFAULT_WARMUP_FRAMES = 25  # Allow auto-exposure, white balance & temporal depth filter to settle fully
 
 
 class RealSenseCamera:
@@ -34,6 +34,9 @@ class RealSenseCamera:
 
         self.pipeline = None
         self.align = None
+        self.spatial = rs.spatial_filter()
+        self.temporal = rs.temporal_filter()
+        self.hole_filling = rs.hole_filling_filter()
         self._started = False
 
     def start(self, verbose=False):
@@ -46,7 +49,7 @@ class RealSenseCamera:
             config.enable_stream(rs.stream.color, self.color_width, self.color_height, rs.format.bgr8, self.fps)
             config.enable_stream(rs.stream.depth, self.depth_width, self.depth_height, rs.format.z16, self.fps)
 
-            print(f"[Camera] Starting RealSense pipeline ({self.color_width}x{self.color_height} color)...", flush=True)
+            print(f"[Camera] Starting RealSense pipeline ({self.color_width}x{self.color_height} color+depth, 30 FPS)...", flush=True)
             profile = self.pipeline.start(config)
 
             # Enable auto-exposure and auto-white-balance on color sensor
@@ -61,9 +64,15 @@ class RealSenseCamera:
             self.align = rs.align(rs.stream.color)
             self._started = True
 
-            # Warmup frames to let auto-exposure and white balance stabilize
+            # Warmup frames to let auto-exposure, white balance, and temporal depth filter stabilize
             for _ in range(self.warmup_frames):
-                self.pipeline.wait_for_frames()
+                frames = self.pipeline.wait_for_frames()
+                aligned = self.align.process(frames)
+                d_frame = aligned.get_depth_frame()
+                if d_frame:
+                    d_filt = self.spatial.process(d_frame)
+                    d_filt = self.temporal.process(d_filt)
+                    self.hole_filling.process(d_filt)
 
         except Exception as e:
             self.stop()
@@ -81,11 +90,12 @@ class RealSenseCamera:
 
     def capture(self):
         """
-        Grabs one aligned color+depth frame pair.
+        Grabs one aligned color+depth frame pair with hardware-filtered depth
+        (spatial + temporal + hole filling), matching verify.py exactly.
 
         Returns:
-            cv_image: np.ndarray (BGR, 1080x1920x3) — high-res for detection & OCR
-            depth_frame: pyrealsense2 depth frame — for deprojection
+            cv_image: np.ndarray (BGR, 480x640x3)
+            depth_frame: pyrealsense2 filtered depth frame — for deprojection
             color_intrinsics: pyrealsense2 intrinsics — for deprojection
             or (None, None, None) if a frame pair could not be grabbed.
         """
@@ -101,10 +111,15 @@ class RealSenseCamera:
             print("[Camera] Failed to grab aligned color/depth frames.", flush=True)
             return None, None, None
 
+        # Apply exact depth filters from verify.py: spatial -> temporal -> hole-filling
+        d_filtered = self.spatial.process(depth_frame)
+        d_filtered = self.temporal.process(d_filtered)
+        d_filtered = self.hole_filling.process(d_filtered).as_depth_frame()
+
         color_intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
         cv_image = np.asanyarray(color_frame.get_data())
 
-        return cv_image, depth_frame, color_intrinsics
+        return cv_image, d_filtered, color_intrinsics
 
     def __enter__(self):
         self.start()

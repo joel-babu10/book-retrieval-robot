@@ -67,6 +67,11 @@ def parse_args():
         action="store_true",
         help="Detect and localize target without executing physical robot pick",
     )
+    parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="Disable real-time OpenCV desktop monitor window",
+    )
     # Parse only known args to safely allow extra runner flags
     args, _ = parser.parse_known_args()
     mode_map = {"1": "auto", "2": "spine", "3": "scattered", "4": "mixed"}
@@ -77,6 +82,12 @@ def parse_args():
 def run():
     args = parse_args()
     selected_mode = args.mode
+    show_ui = not args.no_ui
+
+    from shared.visual_monitor import VisualMonitor
+    monitor = VisualMonitor(enabled=show_ui)
+    if show_ui:
+        monitor.show_startup("Listening for book query (speak anytime or type title)...")
 
     if args.select:
         print("\nSelect arrangement mode:")
@@ -104,10 +115,18 @@ def run():
         print("\nNo book query matched. Exiting.")
         if camera:
             camera.stop()
+        if show_ui:
+            monitor.close()
         return None
 
     query_title = query_result["title"]
     print(f"\nTarget Query: '{query_title}'")
+    if show_ui:
+        monitor.update_status(f"Target query: '{query_title}'. Capturing RealSense RGB+Depth frame...", stage_num=0)
+
+    cv_image = None
+    target = None
+    mode = selected_mode
 
     try:
         # Capture aligned color and depth frame from RealSense
@@ -115,15 +134,26 @@ def run():
         cv_image, depth_frame, color_intrinsics = camera.capture()
         if cv_image is None:
             print("\nFailed to capture frame from RealSense.")
+            monitor.setup_target(None, None, query_title, mode="error")
+            monitor.show_error("Camera Capture Failed", "RealSense D435i could not capture aligned color & depth frame.")
+            monitor.wait_for_user(6000)
             return None
+
+        # Display live camera frame immediately in the HUD monitor
+        if show_ui:
+            monitor.show_frame(cv_image, query_title=query_title, status="Camera frame acquired. Classifying arrangement mode...", mode=selected_mode)
 
         # Determine arrangement mode
         if selected_mode == "auto":
             # [1] Automatic Mode Classifier (tiny YOLO11n-cls + geometric spine verification)
             mode, mode_conf = classify_mode(cv_image, verbose=True)
+            if show_ui:
+                monitor.show_frame(cv_image, query_title=query_title, status=f"Scene classified as {mode.upper()} (conf={mode_conf:.2f}). Running {mode.upper()} pipeline...", mode=mode)
         else:
             mode = selected_mode
             print(f"[Mode] Using user-specified arrangement mode: '{mode.upper()}'", flush=True)
+            if show_ui:
+                monitor.show_frame(cv_image, query_title=query_title, status=f"Mode set to: '{mode.upper()}'. Running detection pipeline...", mode=mode)
 
         # [2] - [5] Load and execute the required pipeline on the pre-captured frame
         if mode == "spine":
@@ -165,20 +195,52 @@ def run():
 
     if target is None:
         print("\n=== NO TARGET FOUND ===")
+        monitor.setup_target(cv_image, None, query_title, mode=mode)
+        monitor.show_error(
+            f"No target found matching query: '{query_title}'",
+            "Candidates scored below similarity threshold (0.35). Check camera alignment and book lighting."
+        )
+        monitor.wait_for_user(7000)
         return None
 
     from shared.display_utils import print_target_summary
     print_target_summary(target)
 
+    # Calculate robot coordinates and initialize visual UI monitor
+    from robot.dobot_controller import get_dobot_controller, compute_parallel_rotation
+    dobot = get_dobot_controller()
+    pick_xyz_m = target.get("xyz_pick_camera_frame")
+    if pick_xyz_m is None:
+        pick_xyz_m = target.get("xyz_center_camera_frame")
+    pick_angle = target.get("pick_edge_angle_deg")
+    is_spine = (target.get("arrangement_mode") == "spine" or target.get("pipeline_winner") == "SPINE" or mode == "spine")
+
+    robot_xyz = dobot.camera_to_dobot_coordinates(pick_xyz_m)
+    rx, ry, rz = float(robot_xyz[0]), float(robot_xyz[1]), float(robot_xyz[2])
+    r_angle = compute_parallel_rotation(rx, ry) if (is_spine or rz >= 60.0 or pick_angle is None) else float(pick_angle)
+    robot_pose = [rx, ry, rz, r_angle]
+
+    monitor.setup_target(cv_image, target, query_title, mode=mode, robot_coords=robot_pose)
+    monitor.update_status(f"Target localized: '{target.get('text', query_title)}'. Ready for pick.", stage_num=0)
+
     # Step 6: Coordinate Transform from Optical Frame to Arm Base Frame & Physical Execution
     should_pick = args.pick and not args.no_pick
     if should_pick and target:
-        pick_xyz_m = target.get("xyz_pick_camera_frame") or target.get("xyz_center_camera_frame")
-        pick_angle = target.get("pick_edge_angle_deg")
-        is_spine = (mode == "spine")
-        from robot.dobot_controller import get_dobot_controller
-        dobot = get_dobot_controller()
-        dobot.execute_pick_sequence(pick_xyz_m, grasp_angle_deg=pick_angle, is_spine=is_spine)
+        def update_ui_cb(msg, stage_num=None, is_error=False, error_detail="", is_success=False):
+            monitor.update_status(msg, stage_num=stage_num, is_error=is_error, error_detail=error_detail, is_success=is_success)
+
+        pick_result = dobot.execute_pick_sequence(
+            pick_xyz_m,
+            grasp_angle_deg=pick_angle,
+            is_spine=is_spine,
+            update_ui=update_ui_cb
+        )
+
+        if pick_result.get("status") == "error":
+            print("\n[Execution Stopped] Inspect monitor window for error diagnosis.", flush=True)
+            monitor.wait_for_user(8000)
+        else:
+            monitor.wait_for_user(4000)
 
     return target
 

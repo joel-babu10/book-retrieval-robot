@@ -246,7 +246,9 @@ def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None)
             f"Approach Angle: {approach_angle:.1f} deg",
         ]
 
-        pick_xyz = best_match.get("xyz_pick_camera_frame") or xyz
+        pick_xyz = best_match.get("xyz_pick_camera_frame")
+        if pick_xyz is None:
+            pick_xyz = xyz
         if pick_xyz is not None:
             info_lines.append(f"Pick XYZ: ({pick_xyz[0]:.3f}, {pick_xyz[1]:.3f}, {pick_xyz[2]:.3f}) m")
 
@@ -409,15 +411,38 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
         pick_u, pick_v = best["top_edge_center"]
         xyz_center, xyz_pick = None, None
         if depth_frame is not None and color_intrinsics is not None:
-            xyz_center = deproject_target(depth_frame, color_intrinsics, u, v)
-            xyz_pick = deproject_target(depth_frame, color_intrinsics, pick_u, pick_v)
+            from input.depth_utils import extract_robust_book_depth
+            book_depth = extract_robust_book_depth(
+                depth_frame,
+                corners=best.get("corners", best.get("obb_corners")),
+                center=(u, v),
+                mask_contour=best.get("mask_contour")
+            )
+            xyz_center = deproject_target(
+                depth_frame, color_intrinsics, u, v,
+                reference_depth=book_depth,
+                corners=best.get("corners")
+            )
+            xyz_pick = deproject_target(
+                depth_frame, color_intrinsics, pick_u, pick_v,
+                reference_depth=book_depth,
+                corners=best.get("corners")
+            )
+
+            if (xyz_pick is None or xyz_pick[2] > 0.46) and book_depth is not None:
+                print(f"[Scattered] Pick depth was background (>0.46m) or missing. Using robust book depth ({book_depth:.3f}m).", flush=True)
+                xyz_pick = deproject_target(
+                    depth_frame, color_intrinsics, pick_u, pick_v,
+                    reference_depth=book_depth
+                )
 
         best["xyz_center_camera_frame"] = xyz_center
         best["xyz_pick_camera_frame"] = xyz_pick
-        best["xyz_camera_frame"] = xyz_pick or xyz_center
+        best_xyz = xyz_pick if xyz_pick is not None else xyz_center
+        best["xyz_camera_frame"] = best_xyz
 
         if save_visual:
-            _save_visual_result(cv_image, detections, best, output_path, xyz=xyz_pick or xyz_center)
+            _save_visual_result(cv_image, detections, best, output_path, xyz=best_xyz)
 
         target_output = {
             "u": u,
@@ -437,7 +462,7 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
             "similarity": best["similarity"],
             "conf": best["conf"],
             "text": best["text"],
-            "xyz_camera_frame": xyz_pick or xyz_center,
+            "xyz_camera_frame": best_xyz,
             "xyz_pick_camera_frame": xyz_pick,
             "xyz_center_camera_frame": xyz_center,
             "corners": best.get("corners", best.get("obb_corners")),

@@ -42,7 +42,7 @@ HOME_POSE = (200.0, 0.0, 160.0, 0.0)
 DEFAULT_DROP_POSE = [200.0, 0.0, 165.0, 0.0]  # Front drop zone at maximum height (X, Y, Z, R)
 DEFAULT_PORT = "COM7"
 W, H, FPS = 640, 480, 30
-DEFAULT_SPINE_ROTATION_DEG = 92.7  # Verified ground-truth from DobotStudio for target book (J1=77.94°, J4=+14.75°)
+DEFAULT_SPINE_ROTATION_DEG = 89.70  # Verified ground-truth from DobotStudio for target book (J1=89.70°, J4=0.0°)
 TRANSIT_MAX_HEIGHT_Z = 165.0       # Maximum safe ceiling height reachable via J2
 
 
@@ -100,14 +100,10 @@ def cam_mm_to_robot_mm(cam_xyz_mm, R, t):
 def compute_parallel_rotation(x, y):
     """
     Computes gripper rotation R parallel to the book spine.
-    Interpolated across verified ground-truth bookshelf poses:
-      - Point 2 (Left,   X=-25.2mm): R = 84.8° (J1=95.9°, J4=-11.0°)
-      - Point 1 (Center, X=43.2mm):  R = 81.0° (J1=81.0°, J4=0.0°)
-      - Point 3 (Right,  X=53.8mm):  R = 92.7° (J1=77.9°, J4=+14.7°)
+    When Dobot points at the shelf target (x, y) with base azimuth
+    J1 = arctan2(y, x), keeping wrist J4 = 0° aligns gripper jaws parallel to
+    the upright spine: R = J1 = arctan2(y, x), verified in DobotStudio (R=82.2° at X=35.5, Y=258.4).
     """
-    if y > 180.0:
-        r_val = 0.01464005 * (x ** 2) - 0.32008491 * x + 67.4968
-        return round(float(np.clip(r_val, 65.0, 110.0)), 1)
     az = float(np.degrees(np.arctan2(y, x)))
     return round(az, 1)
 
@@ -219,10 +215,10 @@ def main():
 
     # 1. Load Calibration Transformation (R, t)
     if not c2r.is_calibrated():
-        R_current = np.array([[1.0, 0.0, 0.0],
-                              [0.0, 0.0, 1.0],
-                              [0.0, -1.0, 0.0]], dtype=float)
-        t_current = np.array([136.52, -3.81, 114.57], dtype=float)
+        R_current = np.array([[ 0.394764,  0.0, -0.908681],
+                              [ 0.852790,  0.0,  0.064282],
+                              [ 0.0,      -0.980158, -0.020429]], dtype=float)
+        t_current = np.array([295.236, 345.090, 118.218], dtype=float)
         c2r.save(R_current, t_current)
     else:
         R_current, t_current = c2r.load()

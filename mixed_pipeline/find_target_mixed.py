@@ -95,7 +95,9 @@ def _render_mixed_visual_result(cv_image, winner_target, winner_mode, spine_scor
     if pick_angle is not None:
         info_lines.append(f"Grasp Angle: {pick_angle:.1f} deg")
 
-    pick_xyz = winner_target.get("xyz_pick_camera_frame") or winner_target.get("xyz_camera_frame")
+    pick_xyz = winner_target.get("xyz_pick_camera_frame")
+    if pick_xyz is None:
+        pick_xyz = winner_target.get("xyz_camera_frame")
     if pick_xyz is not None:
         info_lines.append(f"Pick XYZ: ({pick_xyz[0]:.3f}, {pick_xyz[1]:.3f}, {pick_xyz[2]:.3f}) m")
 
@@ -163,7 +165,16 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
         winner_mode = "SPINE"
         winner_target = spine_target
     elif scattered_target is not None and spine_target is None:
-        winner_mode = "SCATTERED"
+        sc_w = float(scattered_target.get("width_px", 200.0))
+        sc_h = float(scattered_target.get("height_px", 300.0))
+        sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
+        sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
+        is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
+        if is_upright:
+            print(f"\n[Mixed Disambiguation] Winner is an upright shelf book! Promoting winner to SPINE mode.", flush=True)
+            winner_mode = "SPINE"
+        else:
+            winner_mode = "SCATTERED"
         winner_target = scattered_target
     else:
         # Both matched: check if they detect the SAME physical book
@@ -174,7 +185,9 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
         dist = np.hypot(sp_cx - sc_cx, sp_cy - sc_cy)
 
         # Check if spine center is enclosed within scattered polygon
-        sc_corners = scattered_target.get("corners") or scattered_target.get("obb_corners")
+        sc_corners = scattered_target.get("corners")
+        if sc_corners is None:
+            sc_corners = scattered_target.get("obb_corners")
         spine_inside_scattered = False
         if sc_corners is not None:
             dist_poly = cv2.pointPolygonTest(np.array(sc_corners, dtype=np.float32), (float(sp_cx), float(sp_cy)), False)
@@ -182,15 +195,19 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
                 spine_inside_scattered = True
 
         if dist < 180 or spine_inside_scattered:
-            print(f"\n[Mixed Disambiguation] Spine detection (dist={dist:.1f}px, inside={spine_inside_scattered}) is a cover title strip on the flat book!", flush=True)
-            print(f"                       Favoring SCATTERED full-book model for correct desk grasping.", flush=True)
-            winner_mode = "SCATTERED"
-            winner_target = scattered_target
+            print(f"\n[Mixed Disambiguation] Spine detection (dist={dist:.1f}px, inside={spine_inside_scattered}) matches book footprint.", flush=True)
+            winner_mode = "SPINE"
+            winner_target = spine_target
         elif spine_score > (scattered_score + 0.10):
             winner_mode = "SPINE"
             winner_target = spine_target
         elif scattered_score > (spine_score + 0.10):
-            winner_mode = "SCATTERED"
+            sc_w = float(scattered_target.get("width_px", 200.0))
+            sc_h = float(scattered_target.get("height_px", 300.0))
+            sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
+            sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
+            is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
+            winner_mode = "SPINE" if is_upright else "SCATTERED"
             winner_target = scattered_target
         else:
             # Tied or close scores: pick higher detection model confidence
@@ -198,8 +215,37 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
                 winner_mode = "SPINE"
                 winner_target = spine_target
             else:
-                winner_mode = "SCATTERED"
+                sc_w = float(scattered_target.get("width_px", 200.0))
+                sc_h = float(scattered_target.get("height_px", 300.0))
+                sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
+                sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
+                is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
+                winner_mode = "SPINE" if is_upright else "SCATTERED"
                 winner_target = scattered_target
+
+    # When winner is an upright spine, ensure pick point is on the spine edge
+    if winner_mode == "SPINE":
+        corners = winner_target.get("corners")
+        if corners is None:
+            corners = winner_target.get("obb_corners")
+        if corners is not None and len(corners) == 4:
+            corners = np.asarray(corners)
+            sorted_by_y = corners[np.argsort(corners[:, 1])]
+            top_two = sorted_by_y[:2]
+            top_two = top_two[np.argsort(top_two[:, 0])]
+            tl, tr = top_two[0], top_two[1]
+            book_w = float(np.linalg.norm(tr - tl))
+            if book_w > 65.0:
+                spine_w = min(38.0, max(24.0, book_w * 0.15))
+                spine_dir = (tr - tl) / max(book_w, 1e-4)
+                p1 = tl
+                p2 = tl + spine_w * spine_dir
+                top_edge_u = float((p1[0] + p2[0]) / 2.0)
+                top_edge_v = float((p1[1] + p2[1]) / 2.0)
+                winner_target["top_edge_center_u"] = top_edge_u
+                winner_target["top_edge_center_v"] = top_edge_v
+                winner_target["pick_point_2d"] = (top_edge_u, top_edge_v)
+                winner_target["pick_edge_endpoints"] = [(float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))]
 
     winner_target["arrangement_mode"] = winner_mode.lower()
     winner_target["pipeline_winner"] = winner_mode
@@ -212,7 +258,7 @@ def _is_confirmed_vertical_shelf_spine(target):
     if not target:
         return False
     score = target.get("similarity", 0.0)
-    if score < 0.88:
+    if score < 0.80:
         return False
     angle_val = target.get("pick_edge_angle_deg")
     if angle_val is None:
@@ -221,12 +267,12 @@ def _is_confirmed_vertical_shelf_spine(target):
         angle = abs(float(angle_val if angle_val is not None else 0.0))
     except (ValueError, TypeError):
         angle = 0.0
-    # Vertical spine: angle near 0° or 180° (within 35°)
-    is_vertical = (angle <= 35.0 or angle >= 145.0)
+    # Vertical spine: angle near 0°, 180°, or 90° (minAreaRect axis convention)
+    is_vertical = (angle <= 35.0 or angle >= 145.0 or abs(angle - 90.0) <= 25.0)
     w = float(target.get("width_px") or 50.0)
     h = float(target.get("height_px") or 300.0)
     aspect_ratio = max(w, h) / max(min(w, h), 1.0)
-    return is_vertical and (aspect_ratio >= 2.5)
+    return is_vertical and (aspect_ratio >= 1.35)
 
 
 def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=None,
@@ -314,14 +360,27 @@ def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=
                 from shared.sam_refine import extract_refined_pick_edge
                 edge_info = extract_refined_pick_edge(refined_corners)
                 pick_u, pick_v = edge_info["pick_point_2d"]
+                endpoints = edge_info["pick_edge_endpoints"]
+                edge_len = edge_info["pick_edge_length_px"]
+
+                if winner_mode == "SPINE" and edge_len > 65.0:
+                    p1, p2 = np.array(endpoints[0]), np.array(endpoints[1])
+                    spine_w = min(38.0, max(24.0, edge_len * 0.15))
+                    spine_dir = (p2 - p1) / max(edge_len, 1e-4)
+                    sp_p2 = p1 + spine_w * spine_dir
+                    pick_u = float((p1[0] + sp_p2[0]) / 2.0)
+                    pick_v = float((p1[1] + sp_p2[1]) / 2.0)
+                    endpoints = [(float(p1[0]), float(p1[1])), (float(sp_p2[0]), float(sp_p2[1]))]
+                    edge_len = float(spine_w)
+
                 winner_target["pick_point_2d"] = (pick_u, pick_v)
                 winner_target["top_edge_center_u"] = pick_u
                 winner_target["top_edge_center_v"] = pick_v
-                winner_target["pick_edge_endpoints"] = edge_info["pick_edge_endpoints"]
+                winner_target["pick_edge_endpoints"] = endpoints
                 winner_target["pick_edge_angle_deg"] = edge_info["pick_edge_angle_deg"]
                 winner_target["grasp_approach_angle_deg"] = edge_info["grasp_approach_angle_deg"]
                 winner_target["is_short_edge"] = edge_info["is_short_edge"]
-                winner_target["pick_edge_length_px"] = edge_info["pick_edge_length_px"]
+                winner_target["pick_edge_length_px"] = edge_len
                 winner_target["obb_angle"] = edge_info["pick_edge_angle_deg"]
 
                 center_u, center_v = edge_info["center_2d"]
@@ -330,9 +389,29 @@ def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=
 
                 # Re-deproject depth with refined center and pick edge
                 if depth_frame is not None and color_intrinsics is not None:
-                    from input.depth_utils import deproject_target
-                    center_xyz = deproject_target(depth_frame, color_intrinsics, center_u, center_v)
-                    pick_xyz = deproject_target(depth_frame, color_intrinsics, pick_u, pick_v)
+                    from input.depth_utils import deproject_target, extract_robust_book_depth
+                    book_depth = extract_robust_book_depth(
+                        depth_frame,
+                        corners=winner_target.get("corners"),
+                        center=(center_u, center_v),
+                        mask_contour=winner_target.get("mask_contour")
+                    )
+                    center_xyz = deproject_target(
+                        depth_frame, color_intrinsics, center_u, center_v,
+                        reference_depth=book_depth,
+                        corners=winner_target.get("corners")
+                    )
+                    pick_xyz = deproject_target(
+                        depth_frame, color_intrinsics, pick_u, pick_v,
+                        reference_depth=book_depth,
+                        corners=winner_target.get("corners")
+                    )
+                    if (pick_xyz is None or pick_xyz[2] > 0.46) and book_depth is not None:
+                        print(f"[Mixed] Pick depth was background (>0.46m) or missing. Using robust book depth ({book_depth:.3f}m).", flush=True)
+                        pick_xyz = deproject_target(
+                            depth_frame, color_intrinsics, pick_u, pick_v,
+                            reference_depth=book_depth
+                        )
                     winner_target["xyz_center_camera_frame"] = center_xyz
                     winner_target["xyz_pick_camera_frame"] = pick_xyz
                     winner_target["xyz_camera_frame"] = pick_xyz or center_xyz

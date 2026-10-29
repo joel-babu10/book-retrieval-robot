@@ -48,12 +48,14 @@ def _pick_best_match(img, detections, target_title, reader=None, min_similarity=
         if best is None or similarity > best["similarity"]:
             best = d
 
-        # Only exit early if exact 1.00 match
-        if similarity >= 0.98:
+        # Confident match — avoid spending time OCRing remaining candidates
+        if similarity >= 0.85:
+            print(f"  [Spine Match] Confident match ({similarity:.2f} >= 0.85). Early exit!", flush=True)
             break
 
-    if best["similarity"] < min_similarity:
-        print(f"\n[Spine] Best match similarity ({best['similarity']:.2f}) is below threshold ({min_similarity:.2f}). No confident target found.", flush=True)
+    if best is None or best.get("similarity", 0.0) < min_similarity:
+        sim = best.get("similarity", 0.0) if best is not None else 0.0
+        print(f"\n[Spine] Best match similarity ({sim:.2f}) is below threshold ({min_similarity:.2f}). No confident target found.", flush=True)
         return None
 
     print("\n---- Best Match ----", flush=True)
@@ -112,7 +114,7 @@ def _save_visual_result(img, best, output_path, xyz=None):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
 
     info_lines = [
-        f"SAM-REFINED TARGET",
+        "SAM-REFINED TARGET",
         f"OCR: {best['text'][:30]}",
         f"Match: {best['similarity']:.2f}",
         f"Conf: {best['conf']:.2f}",
@@ -124,7 +126,9 @@ def _save_visual_result(img, best, output_path, xyz=None):
     if pick_angle is not None:
         info_lines.append(f"Grasp Angle: {pick_angle:.1f} deg")
 
-    pick_xyz = best.get("xyz_pick_camera_frame") or xyz
+    pick_xyz = best.get("xyz_pick_camera_frame")
+    if pick_xyz is None:
+        pick_xyz = xyz
     if pick_xyz is not None:
         info_lines.append(f"Pick XYZ: ({pick_xyz[0]:.3f}, {pick_xyz[1]:.3f}, {pick_xyz[2]:.3f}) m")
 
@@ -151,7 +155,6 @@ def _save_visual_result(img, best, output_path, xyz=None):
     # Store timestamped copy in saved_runs directory
     try:
         from datetime import datetime
-        import os
         runs_dir = Path(output_path).parent / "saved_runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -188,19 +191,35 @@ def _refine_target_with_sam(img, best):
 
             from shared.sam_refine import extract_refined_pick_edge
             edge_info = extract_refined_pick_edge(refined_corners)
-            best["pick_point_2d"] = edge_info["pick_point_2d"]
-            best["top_edge_center"] = edge_info["pick_point_2d"]
-            best["pick_edge_endpoints"] = edge_info["pick_edge_endpoints"]
+            pick_u, pick_v = edge_info["pick_point_2d"]
+            endpoints = edge_info["pick_edge_endpoints"]
+            edge_len = edge_info["pick_edge_length_px"]
+
+            # Align pick point directly to the true horizontal center of the spine top edge
+            p1, p2 = np.array(endpoints[0]), np.array(endpoints[1])
+            center_x, center_y = edge_info["center_2d"]
+            nominal_u = float((p1[0] + p2[0]) / 2.0)
+            nominal_v = float((p1[1] + p2[1]) / 2.0)
+            # Inset down into spine away from background wall to ensure firm gripper jaw contact
+            v_in = np.array([center_x - nominal_u, center_y - nominal_v], dtype=float)
+            dist_in = float(np.hypot(v_in[0], v_in[1]))
+            inset_w = min(35.0, max(15.0, dist_in * 0.08)) if dist_in > 0 else 0.0
+            pick_inset = np.array([nominal_u, nominal_v]) + (v_in / max(dist_in, 1e-4)) * inset_w
+            pick_u, pick_v = float(pick_inset[0]), float(pick_inset[1])
+
+            best["pick_point_2d"] = (pick_u, pick_v)
+            best["top_edge_center"] = (pick_u, pick_v)
+            best["pick_edge_endpoints"] = endpoints
             best["pick_edge_angle_deg"] = edge_info["pick_edge_angle_deg"]
             best["grasp_approach_angle_deg"] = edge_info["grasp_approach_angle_deg"]
             best["is_short_edge"] = edge_info["is_short_edge"]
-            best["pick_edge_length_px"] = edge_info["pick_edge_length_px"]
+            best["pick_edge_length_px"] = edge_len
             best["obb_angle"] = edge_info["pick_edge_angle_deg"]
             best["center"] = edge_info["center_2d"]
 
             xywhr = best.get("xywhr")
             if xywhr is not None:
-                best["width_px"] = float(min(xywhr[2], xywhr[3]))
+                best["width_px"] = float(edge_len)
 
             print(f"[SAM Refine] Target refined exact coordinates -> Center: ({best['center'][0]:.1f}, {best['center'][1]:.1f}), Pick-edge: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f})", flush=True)
     except Exception as e:
@@ -307,15 +326,39 @@ def find_target_spine_live(target_title, conf_threshold=DEFAULT_CONF,
             u, v = best["center"]
             pick_u, pick_v = best["top_edge_center"]
             if depth_frame is not None and color_intrinsics is not None:
-                center_xyz = deproject_target(depth_frame, color_intrinsics, u, v)
-                pick_xyz = deproject_target(depth_frame, color_intrinsics, pick_u, pick_v)
+                from input.depth_utils import extract_robust_book_depth
+                book_depth = extract_robust_book_depth(
+                    depth_frame,
+                    corners=best.get("corners"),
+                    center=(u, v),
+                    mask_contour=best.get("mask_contour")
+                )
+                center_xyz = deproject_target(
+                    depth_frame, color_intrinsics, u, v,
+                    reference_depth=book_depth,
+                    corners=best.get("corners")
+                )
+                pick_xyz = deproject_target(
+                    depth_frame, color_intrinsics, pick_u, pick_v,
+                    reference_depth=book_depth,
+                    corners=best.get("corners")
+                )
+
+                # Ensure pick_xyz never captures background wall (>0.46m)
+                if (pick_xyz is None or pick_xyz[2] > 0.46) and book_depth is not None:
+                    print(f"[Spine] Pick depth was background (>0.46m) or missing. Using robust book depth ({book_depth:.3f}m).", flush=True)
+                    pick_xyz = deproject_target(
+                        depth_frame, color_intrinsics, pick_u, pick_v,
+                        reference_depth=book_depth
+                    )
 
             best["xyz_center_camera_frame"] = center_xyz
             best["xyz_pick_camera_frame"] = pick_xyz
-            best["xyz_camera_frame"] = pick_xyz or center_xyz
+            best_xyz = pick_xyz if pick_xyz is not None else center_xyz
+            best["xyz_camera_frame"] = best_xyz
 
             if save_visual:
-                _save_visual_result(img.copy(), best, output_path, xyz=pick_xyz or center_xyz)
+                _save_visual_result(img.copy(), best, output_path, xyz=best_xyz)
 
         if best is None:
             return None
@@ -335,7 +378,7 @@ def find_target_spine_live(target_title, conf_threshold=DEFAULT_CONF,
             "similarity": best["similarity"],
             "conf": best["conf"],
             "text": best["text"],
-            "xyz_camera_frame": pick_xyz or center_xyz,
+            "xyz_camera_frame": best_xyz,
             "xyz_pick_camera_frame": pick_xyz,
             "xyz_center_camera_frame": center_xyz,
             "corners": best.get("corners"),

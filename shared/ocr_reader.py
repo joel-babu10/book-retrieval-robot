@@ -171,9 +171,21 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
 
     query_lower = query_str.lower().strip()
 
-    # Exact or full substring containment
-    if query_lower in text_lower or text_lower in query_lower:
+    # Exact match
+    if query_lower == text_lower:
         return 1.0
+
+    # Query fully contained in OCR text (e.g. OCR read '1984 QUALITY IS FREE PHILIP CROSBY', query 'Quality is Free')
+    if query_lower in text_lower:
+        return 1.0
+
+    # OCR text fully contained in query (only valid if OCR captured almost the whole title, not just 1 word like 'with' or 'for')
+    if text_lower in query_lower:
+        containment_ratio = len(text_lower) / max(len(query_lower), 1)
+        if containment_ratio >= 0.80:
+            return 1.0
+        # For short fragments (e.g. 'linear' in 'linear algebra with applications'), do NOT return 1.0!
+        # Fall through to token coverage scoring.
 
     # Chinese direct character matching (e.g., 線性代數)
     if target_book and "aliases" in target_book:
@@ -192,10 +204,11 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
         r = SequenceMatcher(None, text_lower, query_lower).ratio()
         return r if r >= 0.65 else 0.0
 
-    # Token-set exact subset match
     q_set = set(q_tokens)
     t_set = set(t_tokens)
-    if q_set.issubset(t_set) or t_set.issubset(q_set):
+
+    # All query tokens present in OCR text
+    if q_set.issubset(t_set):
         return 1.0
 
     # Separate significant tokens (words with len >= 3 not in stopwords)
@@ -207,8 +220,8 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
     if not t_sig:
         t_sig = t_tokens
 
-    # Significant token subset check
-    if set(q_sig).issubset(set(t_sig)) or set(t_sig).issubset(set(q_sig)):
+    # All significant query words present in OCR text
+    if set(q_sig).issubset(set(t_sig)):
         return 1.0
 
     # Match each significant query token against OCR tokens
@@ -221,24 +234,26 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
                 break
             # Substring match for concatenated or partially recognized words (min 4 chars)
             if len(qw) >= 4 and len(tw) >= 4:
-                if qw in tw or tw in qw:
-                    sub_ratio = min(len(qw), len(tw)) / max(len(qw), len(tw))
-                    if sub_ratio >= 0.60 and sub_ratio > best_w_score:
-                        best_w_score = sub_ratio
+                if qw in tw:
+                    best_w_score = max(best_w_score, 0.88)
+                elif tw in qw:
+                    sub_ratio = len(tw) / len(qw)
+                    if sub_ratio >= 0.60:
+                        best_w_score = max(best_w_score, sub_ratio)
             # SequenceMatcher ratio for typos (e.g. concepts -> onceptsoe, bretschar -> bretscher)
             r = SequenceMatcher(None, qw, tw).ratio()
             if r > best_w_score:
                 best_w_score = r
 
-        # Only accept strong token matches (>= 0.55) to prevent noise accumulation
-        sig_scores.append(best_w_score if best_w_score >= 0.55 else 0.0)
+        # Only accept strong token matches (>= 0.78) to prevent noise accumulation
+        # (e.g. 'quality' vs 'probability' is 0.556, 'free' vs 'for' is 0.571 - must be rejected)
+        sig_scores.append(best_w_score if best_w_score >= 0.78 else 0.0)
 
     # Evaluate match quality across significant tokens
-    sig_matched = [s for s in sig_scores if s >= 0.55]
+    sig_matched = [s for s in sig_scores if s >= 0.78]
     if len(sig_matched) == len(q_sig) and len(q_sig) > 0:
         # All significant words matched!
-        mean_score = sum(sig_scores) / len(sig_scores)
-        fuzzy_score = min(1.0, max(0.90, mean_score))
+        fuzzy_score = sum(sig_scores) / len(sig_scores)
     elif sig_matched:
         # Partial match: scale by proportion of matched significant words
         coverage = len(sig_matched) / len(q_sig)
@@ -272,10 +287,10 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
                 break
 
     # If significant title words matched and author also confirmed, boost to high confidence!
-    if fuzzy_score >= 0.35 and author_boost > 0.0:
+    if fuzzy_score >= 0.30 and author_boost > 0.0:
         fuzzy_score = min(1.0, max(0.85, fuzzy_score + author_boost))
-    elif author_boost >= 0.40 and fuzzy_score < 0.35:
-        # Author alone found with high confidence
+    elif author_boost >= 0.40 and any(qw in author_name for qw in q_tokens):
+        # User query itself specifically mentioned the author
         fuzzy_score = max(fuzzy_score, author_boost)
 
     # Sliding window substring ratio for dense text blocks

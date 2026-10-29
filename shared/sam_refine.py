@@ -244,7 +244,7 @@ def refine_obb_with_sam(img, corners, return_contour=False):
         # 1. Crop localized ROI around the target book with safe padding
         x_min, y_min = np.min(corners_f, axis=0)
         x_max, y_max = np.max(corners_f, axis=0)
-        pad = 25
+        pad = 35
         x0 = max(0, int(x_min - pad))
         y0 = max(0, int(y_min - pad))
         x1 = min(img_w, int(x_max + pad))
@@ -270,15 +270,30 @@ def refine_obb_with_sam(img, corners, return_contour=False):
 
         top_mid = (tl + tr) / 2.0
         bot_mid = (bl + br) / 2.0
-        cover_center = top_mid * 0.55 + bot_mid * 0.45
+        left_mid = (tl + bl) / 2.0
+        right_mid = (tr + br) / 2.0
+        h_axis_len = float(np.linalg.norm(bot_mid - top_mid))
+        w_axis_len = float(np.linalg.norm(right_mid - left_mid))
 
-        pos_points = [
-            [cx_loc, cy_loc],
-            [cx_loc * 0.70 + tl[0] * 0.30, cy_loc * 0.70 + tl[1] * 0.30],
-            [cx_loc * 0.70 + tr[0] * 0.30, cy_loc * 0.70 + tr[1] * 0.30],
-            [cover_center[0] * 0.70 + bl[0] * 0.30, cover_center[1] * 0.70 + bl[1] * 0.30],
-            [cover_center[0] * 0.70 + br[0] * 0.30, cover_center[1] * 0.70 + br[1] * 0.30],
-        ]
+        if h_axis_len >= 1.8 * w_axis_len:
+            # Vertical shelf spine: place prompts along the vertical centerline
+            pos_points = [
+                [cx_loc, cy_loc],
+                [cx_loc * 0.85 + top_mid[0] * 0.15, cy_loc * 0.40 + top_mid[1] * 0.60],
+                [cx_loc * 0.85 + bot_mid[0] * 0.15, cy_loc * 0.40 + bot_mid[1] * 0.60],
+                [cx_loc * 0.70 + tl[0] * 0.15 + bl[0] * 0.15, cy_loc],
+                [cx_loc * 0.70 + tr[0] * 0.15 + br[0] * 0.15, cy_loc],
+            ]
+        else:
+            # Flat/scattered book: cover surface prompts
+            cover_center = top_mid * 0.55 + bot_mid * 0.45
+            pos_points = [
+                [cx_loc, cy_loc],
+                [cx_loc * 0.70 + tl[0] * 0.30, cy_loc * 0.70 + tl[1] * 0.30],
+                [cx_loc * 0.70 + tr[0] * 0.30, cy_loc * 0.70 + tr[1] * 0.30],
+                [cover_center[0] * 0.70 + bl[0] * 0.30, cover_center[1] * 0.70 + bl[1] * 0.30],
+                [cover_center[0] * 0.70 + br[0] * 0.30, cover_center[1] * 0.70 + br[1] * 0.30],
+            ]
         point_coords = np.array(pos_points, dtype=np.float32)
         point_labels = np.ones(len(pos_points), dtype=np.int32)
 
@@ -299,19 +314,25 @@ def refine_obb_with_sam(img, corners, return_contour=False):
         if masks is None or len(masks) == 0:
             return (order_corners_clockwise(corners_f), None) if return_contour else order_corners_clockwise(corners_f)
 
-        # 3. Strict containment: clip mask inside ROI to prevent bleed
+        # 3. Containment with edge-tolerance: allow SAM to find true outer boundary
         obb_roi_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
         pts_roi_int = local_corners.astype(np.int32).reshape((-1, 1, 2))
         cv2.fillPoly(obb_roi_mask, [pts_roi_int], 255)
+        # Dilate mask slightly to prevent artificial edge-clipping along book boundaries
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 17))
+        padded_obb_mask = cv2.dilate(obb_roi_mask, dilate_k)
         ref_area = float(obb_roi_mask.sum())
+
+        ref_aspect = float(max(h_axis_len, w_axis_len) / max(min(h_axis_len, w_axis_len), 1.0))
+        target_aspect = ref_aspect if ref_aspect >= 2.2 else 1.45
 
         best_mask = None
         best_score = -1.0
 
         for idx, m in enumerate(masks):
             m_uint = (m > 0).astype(np.uint8) * 255
-            clipped_m = cv2.bitwise_and(m_uint, obb_roi_mask)
-            overlap_area = float(clipped_m.sum())
+            clipped_m = cv2.bitwise_and(m_uint, padded_obb_mask)
+            overlap_area = float(cv2.bitwise_and(m_uint, obb_roi_mask).sum())
             if overlap_area < (0.20 * ref_area):
                 continue
 
@@ -328,7 +349,7 @@ def refine_obb_with_sam(img, corners, return_contour=False):
             box_area = mw * mh
             solidity = c_area / max(box_area, 1.0)
             sam_conf = float(scores[idx]) if idx < len(scores) else 0.8
-            aspect_fitness = max(0.0, 1.0 - abs(aspect - 1.45) / 1.5)
+            aspect_fitness = max(0.0, 1.0 - abs(aspect - target_aspect) / max(target_aspect, 1.0))
 
             mask_quality = (sam_conf * 0.35) + (solidity * 0.35) + (aspect_fitness * 0.30) + (overlap_area / ref_area) * 0.10
 
@@ -397,10 +418,20 @@ def extract_refined_pick_edge(refined_corners, pick_location="mid"):
     angle_deg = float(np.degrees(np.arctan2(dy, dx)))
     length_px = float(np.hypot(dx, dy))
 
+    center = (float(np.mean(ordered[:, 0])), float(np.mean(ordered[:, 1])))
+
     if pick_location == "top_left":
-        pick_pt = tl
+        nominal_pt = np.array(tl, dtype=float)
     else:
-        pick_pt = (tl + tr) / 2.0
+        nominal_pt = np.array((tl + tr) / 2.0, dtype=float)
+
+    # Inset pick point slightly towards the book body/center to prevent
+    # background wall silhouette bleed and ensure firm gripper jaw contact
+    cx, cy = center
+    v_in = np.array([cx - nominal_pt[0], cy - nominal_pt[1]], dtype=float)
+    dist_to_center = float(np.hypot(v_in[0], v_in[1]))
+    inset_px = min(35.0, max(15.0, dist_to_center * 0.08)) if dist_to_center > 0 else 0.0
+    pick_pt = nominal_pt + (v_in / max(dist_to_center, 1e-4)) * inset_px
 
     d_top = length_px
     d_side = float(np.hypot(br[0] - tr[0], br[1] - tr[1]))
@@ -414,7 +445,7 @@ def extract_refined_pick_edge(refined_corners, pick_location="mid"):
         "grasp_approach_angle_deg": normal_deg,
         "pick_edge_length_px": length_px,
         "is_short_edge": is_short,
-        "center_2d": (float(np.mean(ordered[:, 0])), float(np.mean(ordered[:, 1]))),
+        "center_2d": center,
     }
 
 
@@ -522,7 +553,7 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
         else:
             refined_angle = yolo_angle
 
-        # True contact pick point on the physical edge
+        # True contact pick point on the physical edge, inset slightly towards center to avoid background wall bleed
         if pick_location == "top_left":
             dists = np.hypot(cnt_pts[:, 0] - tl[0], cnt_pts[:, 1] - tl[1])
             best_pt = cnt_pts[np.argmin(dists)]
@@ -530,7 +561,13 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
             dists = np.hypot(cnt_pts[:, 0] - nominal_pick[0], cnt_pts[:, 1] - nominal_pick[1])
             best_pt = cnt_pts[np.argmin(dists)]
 
-        pick_u, pick_v = float(best_pt[0]), float(best_pt[1])
+        cx, cy = center_2d
+        v_in = np.array([cx - best_pt[0], cy - best_pt[1]], dtype=float)
+        dist_to_c = float(np.hypot(v_in[0], v_in[1]))
+        inset_px = min(30.0, max(12.0, dist_to_c * 0.08)) if dist_to_c > 0 else 0.0
+        inset_pt = best_pt + (v_in / max(dist_to_c, 1e-4)) * inset_px
+
+        pick_u, pick_v = float(inset_pt[0]), float(inset_pt[1])
         norm_deg = float((refined_angle + 90.0 + 180.0) % 360.0 - 180.0)
 
         return {

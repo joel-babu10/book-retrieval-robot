@@ -1,5 +1,16 @@
 [
   {
+    "book_id": "B2000",
+    "title": "Quality is Free",
+    "author": "Philip B. Crosby",
+    "edition": "First Edition",
+    "aliases": ["Quality is Free", "Quality is free", "Quality", "QUALITY IS FREE", "Philip B. Crosby", "Philip Crosby", "Crosby"],
+    "call_number": "658.5 CRO",
+    "shelf_level": "1",
+    "order_position": "1",
+    "rfid_tag": "E200341201234519"
+  },
+  {
     "book_id": "B2001",
     "title": "Concepts of Database Management",
     "author": "Philip J. Pratt, Joseph J. Adamski",

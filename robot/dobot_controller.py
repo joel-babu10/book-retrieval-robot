@@ -34,14 +34,10 @@ TRANSIT_MAX_HEIGHT_Z = 165.0
 def compute_parallel_rotation(x, y):
     """
     Computes gripper rotation R parallel to the book spine.
-    Interpolated across verified ground-truth bookshelf poses:
-      - Point 2 (Left,   X=-25.2mm): R = 84.8° (J1=95.9°, J4=-11.0°)
-      - Point 1 (Center, X=43.2mm):  R = 81.0° (J1=81.0°, J4=0.0°)
-      - Point 3 (Right,  X=53.8mm):  R = 92.7° (J1=77.9°, J4=+14.7°)
+    When Dobot points at the shelf target (x, y) with base azimuth
+    J1 = arctan2(y, x), keeping wrist J4 = 0° aligns gripper jaws parallel to
+    the upright spine: R = J1 = arctan2(y, x), verified in DobotStudio (R=82.2° at X=35.5, Y=258.4).
     """
-    if y > 180.0:
-        r_val = 0.01464005 * (x ** 2) - 0.32008491 * x + 67.4968
-        return round(float(np.clip(r_val, 65.0, 110.0)), 1)
     az = float(np.degrees(np.arctan2(y, x)))
     return round(az, 1)
 
@@ -86,6 +82,10 @@ class DobotController:
         self.bot = None
         self.is_connected = False
         self.connect(port)
+
+    @staticmethod
+    def compute_parallel_rotation(x, y):
+        return compute_parallel_rotation(x, y)
 
     def connect(self, port=None):
         """Connects to the Dobot Magician arm on the specified or auto-detected COM port."""
@@ -144,12 +144,12 @@ class DobotController:
         if np.max(np.abs([xc, yc, zc])) < 5.0:
             xc, yc, zc = xc * 1000.0, yc * 1000.0, zc * 1000.0
 
-        xr = 0.394764 * xc - 0.908681 * zc + 296.77
-        yr = 0.852790 * xc + 0.064282 * zc + 320.54
-        zr = -0.980158 * yc - 0.020429 * zc + 115.07
+        xr = 0.394764 * xc - 0.908681 * zc + 295.236
+        yr = 0.852790 * xc + 0.064282 * zc + 345.090
+        zr = -0.980158 * yc - 0.020429 * zc + 118.218
         return np.array([xr, yr, zr])
 
-    def execute_pick_sequence(self, target_xyz_m, grasp_angle_deg=None, is_spine=False):
+    def execute_pick_sequence(self, target_xyz_m, grasp_angle_deg=None, is_spine=False, update_ui=None):
         """
         Executes complete autonomous pick and retrieval sequence:
           1. Ascend to Maximum Height using J2 (Clearance Elevation) & open jaws
@@ -164,7 +164,8 @@ class DobotController:
         robot_xyz = self.camera_to_dobot_coordinates(target_xyz_m)
         rx, ry, rz = float(robot_xyz[0]), float(robot_xyz[1]), float(robot_xyz[2])
 
-        if is_spine or grasp_angle_deg is None:
+        # Any target on the bookshelf (Z >= 60mm) or marked as spine MUST use verified shelf-parallel rotation
+        if is_spine or rz >= 60.0 or grasp_angle_deg is None:
             r_angle = compute_parallel_rotation(rx, ry)
         else:
             r_angle = float(grasp_angle_deg)
@@ -180,43 +181,82 @@ class DobotController:
         print(f"Drop Station:           X={dx:.1f}mm, Y={dy:.1f}mm, Z={dz:.1f}mm, R={dr:.1f}°", flush=True)
         print(f"Hardware Connected:     {self.is_connected}", flush=True)
 
+        # Validate kinematic limits before executing physical motions
+        r_reach = float(np.hypot(rx, ry))
+        reach_ok, reach_reason, _ = K.check(rx, ry, rz)
+        if not reach_ok:
+            is_bg_depth = (target_xyz_m is not None and len(target_xyz_m) >= 3 and float(target_xyz_m[2]) > 0.46)
+            bg_hint = " Depth was sampled from background wall (>0.46m)." if is_bg_depth else ""
+            err_msg = f"Target unreachable: {reach_reason} at ({rx:.1f}, {ry:.1f}, {rz:.1f}) mm (r={r_reach:.1f} mm).{bg_hint}"
+            print(f"\n[Dobot ERROR] {err_msg}", flush=True)
+            if update_ui:
+                err_detail = "Target depth sampled from background wall behind shelf." if is_bg_depth else "Target is outside robot physical reach. Shelf placed too far or too close."
+                update_ui(err_msg, stage_num=0, is_error=True, error_detail=err_detail)
+            return {
+                "status": "error",
+                "error_type": "reachability",
+                "message": err_msg,
+                "dobot_target_mm": [rx, ry, rz, r_angle],
+            }
+
         if self.is_connected and self.bot is not None:
             try:
                 self.bot.clear_alarms()
                 cur = self.bot.get_pose().position
 
                 # 1. Elevate to Maximum Height using J2 before ANY horizontal movement
-                print(f"  [1/8] Elevating to maximum height Z={transit_z:.0f} mm using J2...", flush=True)
+                msg_1 = f"Elevating to maximum height Z={transit_z:.0f} mm using J2..."
+                print(f"  [1/8] {msg_1}", flush=True)
+                if update_ui:
+                    update_ui(msg_1, stage_num=1)
                 _set_gripper_state(self.bot, "open")
                 time.sleep(0.2)
                 self.bot.move_to(cur.x, cur.y, transit_z, cur.r, wait=True)
 
                 # 2. Pre-Rotate Gripper to target R at Maximum Height
-                print(f"  [2/8] Pre-rotating gripper to R={r_angle:.1f}° at maximum height...", flush=True)
+                msg_2 = f"Pre-rotating gripper to R={r_angle:.1f}° at maximum height..."
+                print(f"  [2/8] {msg_2}", flush=True)
+                if update_ui:
+                    update_ui(msg_2, stage_num=2)
                 self.bot.move_to(cur.x, cur.y, transit_z, r_angle, wait=True)
 
                 # 3. Transit overhead to target strictly at Maximum Height
-                print(f"  [3/8] Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm...", flush=True)
+                msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm..."
+                print(f"  [3/8] {msg_3}", flush=True)
+                if update_ui:
+                    update_ui(msg_3, stage_num=3)
                 self.bot.move_to(rx, ry, z_max_shelf, r_angle, wait=True)
                 time.sleep(0.3)
 
                 # 4. Strictly Vertical Descent straight down into book spine
-                print(f"  [4/8] Descending vertically down onto spine at Z={rz:.1f} mm...", flush=True)
+                msg_4 = f"Descending vertically down onto spine at Z={rz:.1f} mm..."
+                print(f"  [4/8] {msg_4}", flush=True)
+                if update_ui:
+                    update_ui(msg_4, stage_num=4)
                 self.bot.move_to(rx, ry, rz, r_angle, wait=True)
                 time.sleep(0.4)
 
                 # 5. Clamp gripper (full pressure dwell for tight grip)
-                print(f"  [5/8] Clamping jaws firmly on spine (full pressure dwell)...", flush=True)
+                msg_5 = f"Clamping jaws firmly on spine (full pressure dwell)..."
+                print(f"  [5/8] {msg_5}", flush=True)
+                if update_ui:
+                    update_ui(msg_5, stage_num=5)
                 _set_gripper_state(self.bot, "close")
                 time.sleep(1.2)
 
                 # 6. Strictly Vertical Extraction: Lift book straight up using J2 to Maximum Height
-                print(f"  [6/8] Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2...", flush=True)
+                msg_6 = f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2..."
+                print(f"  [6/8] {msg_6}", flush=True)
+                if update_ui:
+                    update_ui(msg_6, stage_num=6)
                 self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
                 time.sleep(0.3)
 
                 # 7. Transfer to Drop Zone at Maximum Height & Drop directly
-                print(f"  [7/8] Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.1f} mm...", flush=True)
+                msg_7 = f"Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.1f} mm..."
+                print(f"  [7/8] {msg_7}", flush=True)
+                if update_ui:
+                    update_ui(msg_7, stage_num=7)
                 self.bot.move_to(dx, dy, transit_z, dr, wait=True)
                 time.sleep(0.3)
 
@@ -227,15 +267,33 @@ class DobotController:
                 _set_gripper_state(self.bot, "off")
 
                 # 8. Retract arm safely to Home
-                print(f"  [8/8] Retracting arm back to Home Standby at Maximum Height...", flush=True)
+                msg_8 = f"Retracting arm back to Home Standby at Maximum Height..."
+                print(f"  [8/8] {msg_8}", flush=True)
+                if update_ui:
+                    update_ui(msg_8, stage_num=8)
                 self.bot.move_to(DOBOT_HOME[0], DOBOT_HOME[1], DOBOT_HOME[2], DOBOT_HOME[3], wait=True)
 
-                print("\n[SUCCESS] Book successfully retrieved from shelf and dropped at deposit station!", flush=True)
+                success_msg = "Book successfully retrieved from shelf and dropped at deposit station!"
+                print(f"\n[SUCCESS] {success_msg}", flush=True)
+                if update_ui:
+                    update_ui(success_msg, stage_num=8, is_success=True)
 
             except Exception as e:
+                err_msg = f"Dobot execution error: {e}"
                 print(f"[Dobot Execution Error]: {e}", flush=True)
+                if update_ui:
+                    update_ui(err_msg, is_error=True, error_detail=str(e))
+                return {
+                    "status": "error",
+                    "error_type": "execution",
+                    "message": err_msg,
+                    "dobot_target_mm": [rx, ry, rz, r_angle],
+                }
         else:
-            print("  [Simulated] Hardware not connected. Trajectory simulated successfully.", flush=True)
+            sim_msg = "Hardware not connected. Trajectory simulated successfully."
+            print(f"  [Simulated] {sim_msg}", flush=True)
+            if update_ui:
+                update_ui(f"[SIMULATED] {sim_msg}", stage_num=8, is_success=True)
 
         print(f"==========================================================\n", flush=True)
 
