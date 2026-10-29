@@ -133,11 +133,62 @@ def _render_mixed_visual_result(cv_image, winner_target, winner_mode, spine_scor
         print(f"Warning storing image history: {e}", flush=True)
 
 
+def _is_flat_desk_target(t):
+    """Checks if a target detection represents a book lying flat on the desk surface."""
+    if not t:
+        return False
+    corners = t.get("corners")
+    if corners is None:
+        corners = t.get("obb_corners")
+    if corners is not None and len(corners) == 4:
+        c = np.asarray(corners)
+        dx = float(np.ptp(c[:, 0]))
+        dy = float(np.ptp(c[:, 1]))
+        w = float(min(t.get("width_px", dx), t.get("height_px", dy)))
+        h = float(max(t.get("width_px", dx), t.get("height_px", dy)))
+        aspect = h / max(w, 1.0)
+        cy = float(t.get("center", (0, 0))[1])
+        y_top = float(np.min(c[:, 1]))
+
+        # Horizontal book across desk
+        if dx >= 1.15 * dy:
+            return True
+        # Wide cover face visible
+        if w >= 170.0 and aspect <= 2.2:
+            return True
+        # Desk surface location without tall shelf height
+        if (cy > 750.0 or y_top > 550.0) and dy < 350.0:
+            return True
+    return False
+
+
+def _is_upright_shelf_target(t):
+    """Checks if a target detection is an upright book/spine on a shelf."""
+    if not t:
+        return False
+    corners = t.get("corners")
+    if corners is None:
+        corners = t.get("obb_corners")
+    if corners is not None and len(corners) == 4:
+        c = np.asarray(corners)
+        dx = float(np.ptp(c[:, 0]))
+        dy = float(np.ptp(c[:, 1]))
+        w = float(min(t.get("width_px", dx), t.get("height_px", dy)))
+        h = float(max(t.get("width_px", dx), t.get("height_px", dy)))
+        aspect = h / max(w, 1.0)
+        y_top = float(np.min(c[:, 1]))
+        cy = float(t.get("center", (0, 0))[1])
+
+        # Tall vertical column reaching shelf height
+        if dy >= 350.0 and y_top < 550.0 and dy >= 1.8 * dx and aspect >= 2.0 and cy < 820.0:
+            return True
+    return False
+
+
 def _evaluate_winner(spine_target, scattered_target, query_title):
     """
     Compares spine and scattered detection results and selects the winning candidate.
-    Includes spatial disambiguation to prevent flat book title banners from
-    falsely winning as shelf spines (fixes Image 2 issue).
+    Uses geometric classification to properly classify flat desk books vs upright shelf spines.
     """
     spine_score = spine_target.get("similarity", 0.0) if spine_target else 0.0
     scattered_score = scattered_target.get("similarity", 0.0) if scattered_target else 0.0
@@ -162,20 +213,11 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
         return None, None, 0.0, 0.0
 
     if spine_target is not None and scattered_target is None:
-        winner_mode = "SPINE"
         winner_target = spine_target
+        winner_mode = "SCATTERED" if _is_flat_desk_target(spine_target) else "SPINE"
     elif scattered_target is not None and spine_target is None:
-        sc_w = float(scattered_target.get("width_px", 200.0))
-        sc_h = float(scattered_target.get("height_px", 300.0))
-        sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
-        sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
-        is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
-        if is_upright:
-            print(f"\n[Mixed Disambiguation] Winner is an upright shelf book! Promoting winner to SPINE mode.", flush=True)
-            winner_mode = "SPINE"
-        else:
-            winner_mode = "SCATTERED"
         winner_target = scattered_target
+        winner_mode = "SPINE" if _is_upright_shelf_target(scattered_target) else "SCATTERED"
     else:
         # Both matched: check if they detect the SAME physical book
         sp_cx = spine_target.get("u", spine_target.get("center", (0, 0))[0])
@@ -194,58 +236,35 @@ def _evaluate_winner(spine_target, scattered_target, query_title):
             if dist_poly >= 0:
                 spine_inside_scattered = True
 
-        if dist < 180 or spine_inside_scattered:
-            print(f"\n[Mixed Disambiguation] Spine detection (dist={dist:.1f}px, inside={spine_inside_scattered}) matches book footprint.", flush=True)
-            winner_mode = "SPINE"
-            winner_target = spine_target
-        elif spine_score > (scattered_score + 0.10):
-            winner_mode = "SPINE"
-            winner_target = spine_target
-        elif scattered_score > (spine_score + 0.10):
-            sc_w = float(scattered_target.get("width_px", 200.0))
-            sc_h = float(scattered_target.get("height_px", 300.0))
-            sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
-            sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
-            is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
-            winner_mode = "SPINE" if is_upright else "SCATTERED"
-            winner_target = scattered_target
-        else:
-            # Tied or close scores: pick higher detection model confidence
-            if spine_target.get("conf", 0.0) >= scattered_target.get("conf", 0.0):
+        same_book = (dist < 180 or spine_inside_scattered)
+
+        if same_book:
+            # When both models detected the same book, determine physical arrangement:
+            # If it's a flat book lying on the desk, SCATTERED pipeline provides the accurate full outline
+            if _is_flat_desk_target(scattered_target) or not _is_upright_shelf_target(spine_target):
+                print(f"\n[Mixed Disambiguation] Book at (u={sc_cx:.1f}, v={sc_cy:.1f}) is a flat surface book -> SCATTERED mode.", flush=True)
+                winner_mode = "SCATTERED"
+                winner_target = scattered_target
+            else:
+                print(f"\n[Mixed Disambiguation] Book at (u={sp_cx:.1f}, v={sp_cy:.1f}) is an upright shelf spine -> SPINE mode.", flush=True)
                 winner_mode = "SPINE"
                 winner_target = spine_target
-            else:
-                sc_w = float(scattered_target.get("width_px", 200.0))
-                sc_h = float(scattered_target.get("height_px", 300.0))
-                sc_ang = abs(float(scattered_target.get("obb_angle", 0.0)))
-                sc_aspect = max(sc_w, sc_h) / max(min(sc_w, sc_h), 1.0)
-                is_upright = (sc_ang <= 35.0 or sc_ang >= 145.0 or abs(sc_ang - 90.0) <= 25.0 or sc_aspect >= 1.6)
-                winner_mode = "SPINE" if is_upright else "SCATTERED"
+        else:
+            # Different books: compare query similarity scores
+            if scattered_score > (spine_score + 0.05):
                 winner_target = scattered_target
-
-    # When winner is an upright spine, ensure pick point is on the spine edge
-    if winner_mode == "SPINE":
-        corners = winner_target.get("corners")
-        if corners is None:
-            corners = winner_target.get("obb_corners")
-        if corners is not None and len(corners) == 4:
-            corners = np.asarray(corners)
-            sorted_by_y = corners[np.argsort(corners[:, 1])]
-            top_two = sorted_by_y[:2]
-            top_two = top_two[np.argsort(top_two[:, 0])]
-            tl, tr = top_two[0], top_two[1]
-            book_w = float(np.linalg.norm(tr - tl))
-            if book_w > 65.0:
-                spine_w = min(38.0, max(24.0, book_w * 0.15))
-                spine_dir = (tr - tl) / max(book_w, 1e-4)
-                p1 = tl
-                p2 = tl + spine_w * spine_dir
-                top_edge_u = float((p1[0] + p2[0]) / 2.0)
-                top_edge_v = float((p1[1] + p2[1]) / 2.0)
-                winner_target["top_edge_center_u"] = top_edge_u
-                winner_target["top_edge_center_v"] = top_edge_v
-                winner_target["pick_point_2d"] = (top_edge_u, top_edge_v)
-                winner_target["pick_edge_endpoints"] = [(float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))]
+                winner_mode = "SPINE" if _is_upright_shelf_target(scattered_target) else "SCATTERED"
+            elif spine_score > (scattered_score + 0.05):
+                winner_target = spine_target
+                winner_mode = "SCATTERED" if _is_flat_desk_target(spine_target) else "SPINE"
+            else:
+                # Tied scores: check detection confidence
+                if spine_target.get("conf", 0.0) >= scattered_target.get("conf", 0.0):
+                    winner_target = spine_target
+                    winner_mode = "SCATTERED" if _is_flat_desk_target(spine_target) else "SPINE"
+                else:
+                    winner_target = scattered_target
+                    winner_mode = "SPINE" if _is_upright_shelf_target(scattered_target) else "SCATTERED"
 
     winner_target["arrangement_mode"] = winner_mode.lower()
     winner_target["pipeline_winner"] = winner_mode
@@ -258,21 +277,9 @@ def _is_confirmed_vertical_shelf_spine(target):
     if not target:
         return False
     score = target.get("similarity", 0.0)
-    if score < 0.80:
+    if score < 0.85:
         return False
-    angle_val = target.get("pick_edge_angle_deg")
-    if angle_val is None:
-        angle_val = target.get("obb_angle", 0.0)
-    try:
-        angle = abs(float(angle_val if angle_val is not None else 0.0))
-    except (ValueError, TypeError):
-        angle = 0.0
-    # Vertical spine: angle near 0°, 180°, or 90° (minAreaRect axis convention)
-    is_vertical = (angle <= 35.0 or angle >= 145.0 or abs(angle - 90.0) <= 25.0)
-    w = float(target.get("width_px") or 50.0)
-    h = float(target.get("height_px") or 300.0)
-    aspect_ratio = max(w, h) / max(min(w, h), 1.0)
-    return is_vertical and (aspect_ratio >= 1.35)
+    return _is_upright_shelf_target(target)
 
 
 def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=None,
@@ -358,20 +365,11 @@ def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=
                     winner_target["mask_contour"] = sam_contour
 
                 from shared.sam_refine import extract_refined_pick_edge
-                edge_info = extract_refined_pick_edge(refined_corners)
+                pick_loc = "spine_mid" if winner_mode == "SCATTERED" else "top_left"
+                edge_info = extract_refined_pick_edge(refined_corners, pick_location=pick_loc, img=cv_image, query_title=query_title)
                 pick_u, pick_v = edge_info["pick_point_2d"]
                 endpoints = edge_info["pick_edge_endpoints"]
                 edge_len = edge_info["pick_edge_length_px"]
-
-                if winner_mode == "SPINE" and edge_len > 65.0:
-                    p1, p2 = np.array(endpoints[0]), np.array(endpoints[1])
-                    spine_w = min(38.0, max(24.0, edge_len * 0.15))
-                    spine_dir = (p2 - p1) / max(edge_len, 1e-4)
-                    sp_p2 = p1 + spine_w * spine_dir
-                    pick_u = float((p1[0] + sp_p2[0]) / 2.0)
-                    pick_v = float((p1[1] + sp_p2[1]) / 2.0)
-                    endpoints = [(float(p1[0]), float(p1[1])), (float(sp_p2[0]), float(sp_p2[1]))]
-                    edge_len = float(spine_w)
 
                 winner_target["pick_point_2d"] = (pick_u, pick_v)
                 winner_target["top_edge_center_u"] = pick_u
@@ -483,7 +481,8 @@ def find_target_mixed_image(image_path, query_title, refine_sam=True, save_visua
                 winner_target["mask_contour"] = sam_contour
 
             from shared.sam_refine import extract_refined_pick_edge
-            edge_info = extract_refined_pick_edge(refined_corners)
+            pick_loc = "spine_mid" if winner_mode == "SCATTERED" else "top_left"
+            edge_info = extract_refined_pick_edge(refined_corners, pick_location=pick_loc, img=cv_image, query_title=query_title)
             pick_u, pick_v = edge_info["pick_point_2d"]
             winner_target["pick_point_2d"] = (pick_u, pick_v)
             winner_target["top_edge_center_u"] = pick_u

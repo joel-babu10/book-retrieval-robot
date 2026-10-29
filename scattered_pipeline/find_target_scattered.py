@@ -81,22 +81,24 @@ def _pick_best_match(cv_image, detections, query_title, reader=None, min_similar
     return best
 
 
-def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_location="top_left"):
+def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_location="spine_mid", query_title=None):
     """
     Refines target book coordinates using SAM.
     Supports two modes:
-      - 'fast_pick': Uses SAM strictly on the grasp edge / top-left corner to get the
+      - 'fast_pick': Uses SAM strictly on the grasp edge (middle of the spine) to get the
                      pickup point without segmenting or bounding the entire book.
       - 'full': Segments the entire book cover, fitting a 4-corner perspective quadrilateral.
     """
     if best is None or "corners" not in best:
         return best
 
+    target_query = query_title or best.get("text")
+
     if refine_mode == "fast_pick":
         try:
             from shared.sam_refine import refine_pickup_point_with_sam
-            print(f"\n[SAM Fast Pick] Target book matched ('{best['text']}'). Refining grasp pickup point...", flush=True)
-            res = refine_pickup_point_with_sam(cv_image, best["corners"], pick_location=pick_location)
+            print(f"\n[SAM Fast Pick] Target book matched ('{best['text']}'). Refining grasp pickup point on spine...", flush=True)
+            res = refine_pickup_point_with_sam(cv_image, best["corners"], pick_location=pick_location, query_title=target_query)
             if res is not None:
                 best["pick_point_2d"] = res["pick_point_2d"]
                 best["top_edge_center"] = res["pick_point_2d"]
@@ -111,7 +113,7 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
                 best["pick_contour"] = res.get("pick_contour")
                 best["refine_mode"] = "fast_pick"
 
-                print(f"[SAM Fast Pick] Pick Point: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f}) px | Grasp Angle: {best['pick_edge_angle_deg']:.1f}° | Approach: {best['grasp_approach_angle_deg']:.1f}°", flush=True)
+                print(f"[SAM Fast Pick] Spine Pick Point: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f}) px | Grasp Angle: {best['pick_edge_angle_deg']:.1f}° | Approach: {best['grasp_approach_angle_deg']:.1f}°", flush=True)
         except Exception as e:
             print(f"[SAM Fast Pick] Target refinement fallback: {e}", flush=True)
         return best
@@ -131,7 +133,7 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
             if sam_contour is not None:
                 best["mask_contour"] = sam_contour
 
-            edge_info = extract_refined_pick_edge(refined_corners, pick_location=pick_location)
+            edge_info = extract_refined_pick_edge(refined_corners, pick_location=pick_location, img=cv_image, query_title=target_query)
             best["pick_point_2d"] = edge_info["pick_point_2d"]
             best["top_edge_center"] = edge_info["pick_point_2d"]
             best["pick_edge_endpoints"] = edge_info["pick_edge_endpoints"]
@@ -150,7 +152,7 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
             best["height_px"] = float(max(w, h))
             best["refine_mode"] = "full"
 
-            print(f"[SAM Refine] Target refined exact coordinates -> Center: ({best['center'][0]:.1f}, {best['center'][1]:.1f}), Top-Left Pick: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f})", flush=True)
+            print(f"[SAM Refine] Target refined exact coordinates -> Center: ({best['center'][0]:.1f}, {best['center'][1]:.1f}), Spine Mid Pick: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f})", flush=True)
     except Exception as e:
         print(f"[SAM Refine] Target refinement fallback: {e}", flush=True)
 
@@ -200,7 +202,7 @@ def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None)
             cv2.circle(img, (int(u_top), int(v_top)), 8, (0, 0, 255), -1)
             cv2.drawMarker(img, (int(u_top), int(v_top)), (255, 255, 255),
                            markerType=cv2.MARKER_CROSS, markerSize=12, thickness=2)
-            cv2.putText(img, "PICK [TOP-LEFT]", (int(u_top) - 25, max(25, int(v_top) - 15)),
+            cv2.putText(img, "PICK [SPINE MID]", (int(u_top) - 25, max(25, int(v_top) - 15)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 255), 2, cv2.LINE_AA)
 
             title_header = "SAM FAST-PICK TARGET [SCATTERED]"
@@ -231,7 +233,7 @@ def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None)
             cv2.circle(img, (int(u_top), int(v_top)), 7, (0, 0, 255), -1)
             cv2.drawMarker(img, (int(u_top), int(v_top)), (255, 255, 255),
                            markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-            cv2.putText(img, "PICK [TOP-LEFT]", (int(u_top) - 20, max(20, int(v_top) - 12)),
+            cv2.putText(img, "PICK [SPINE MID]", (int(u_top) - 20, max(20, int(v_top) - 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
 
             title_header = "SAM-REFINED TARGET [SCATTERED]"
@@ -241,7 +243,7 @@ def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None)
             f"OCR: {best_match['text'][:28]}",
             f"Match: {best_match['similarity']:.2f}",
             f"Conf: {best_match['conf']:.2f}",
-            f"Top-Left Pick: ({u_top:.1f}, {v_top:.1f})",
+            f"Spine Pick: ({u_top:.1f}, {v_top:.1f})",
             f"Grasp Angle: {pick_angle:.1f} deg",
             f"Approach Angle: {approach_angle:.1f} deg",
         ]
@@ -294,7 +296,7 @@ def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None)
 def find_target_scattered_image(image_path, query_title, conf_threshold=DEFAULT_CONF,
                                  save_visual=True, output_path="result_target_scattered.jpg",
                                  min_similarity=MIN_SIMILARITY_THRESHOLD, refine_mode="fast_pick",
-                                 pick_location="top_left", refine_sam=None):
+                                 pick_location="spine_mid", refine_sam=None):
     """
     Runs scattered-book detection + OCR matching on a saved image file.
     Supports refine_mode='fast_pick' (default, targets pickup point without whole-book boundary)
@@ -320,7 +322,7 @@ def find_target_scattered_image(image_path, query_title, conf_threshold=DEFAULT_
         return None
 
     if refine_mode:
-        best = _refine_target_with_sam(cv_image, best, refine_mode=refine_mode, pick_location=pick_location)
+        best = _refine_target_with_sam(cv_image, best, refine_mode=refine_mode, pick_location=pick_location, query_title=query_title)
 
     if save_visual:
         _save_visual_result(cv_image, detections, best, output_path)
@@ -361,7 +363,7 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
                                 save_visual=True, output_path="result_target_scattered_live.jpg",
                                 min_similarity=MIN_SIMILARITY_THRESHOLD, camera=None,
                                 cv_image=None, depth_frame=None, color_intrinsics=None,
-                                refine_mode="fast_pick", pick_location="top_left",
+                                refine_mode="fast_pick", pick_location="spine_mid",
                                 refine_sam=None):
     """
     Full live pipeline: captures an aligned color+depth frame from RealSense,
@@ -405,7 +407,7 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
             return None
 
         if refine_mode:
-            best = _refine_target_with_sam(cv_image, best, refine_mode=refine_mode, pick_location=pick_location)
+            best = _refine_target_with_sam(cv_image, best, refine_mode=refine_mode, pick_location=pick_location, query_title=query_title)
 
         u, v = best["center"]
         pick_u, pick_v = best["top_edge_center"]

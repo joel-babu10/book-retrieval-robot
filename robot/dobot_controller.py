@@ -220,21 +220,54 @@ class DobotController:
                     update_ui(msg_2, stage_num=2)
                 self.bot.move_to(cur.x, cur.y, transit_z, r_angle, wait=True)
 
-                # 3. Transit overhead to target strictly at Maximum Height
-                msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm..."
-                print(f"  [3/8] {msg_3}", flush=True)
-                if update_ui:
-                    update_ui(msg_3, stage_num=3)
-                self.bot.move_to(rx, ry, z_max_shelf, r_angle, wait=True)
-                time.sleep(0.3)
+                try:
+                    import pydobotplus.dobotplus as dp
+                    movl_mode = dp.MODE_PTP.MOVL_XYZ
+                except Exception:
+                    movl_mode = None
 
-                # 4. Strictly Vertical Descent straight down into book spine
-                msg_4 = f"Descending vertically down onto spine at Z={rz:.1f} mm..."
-                print(f"  [4/8] {msg_4}", flush=True)
-                if update_ui:
-                    update_ui(msg_4, stage_num=4)
-                self.bot.move_to(rx, ry, rz, r_angle, wait=True)
-                time.sleep(0.4)
+                if not is_spine:
+                    # Scattered Book: Target height is at book surface Z ≈ 3.0 mm (verified in DobotStudio)
+                    target_pick_z = 3.0 if rz < 3.0 else float(min(rz, 35.0))
+                    hover_z = target_pick_z + 47.0  # ~50 mm overhead hover
+                    transit_overhead_z = float(min(z_max_shelf, 130.0))
+
+                    # 3a. Transit overhead at safe ceiling clearance (preventing J3 negative limit)
+                    msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {transit_overhead_z:.1f}) mm..."
+                    print(f"  [3/8] {msg_3}", flush=True)
+                    if update_ui:
+                        update_ui(msg_3, stage_num=3)
+                    self.bot.move_to(rx, ry, transit_overhead_z, r_angle, wait=True)
+                    time.sleep(0.2)
+
+                    # 3b. Position directly ABOVE the book spine (overhead hover)
+                    msg_hover = f"Positioning directly above book spine at Z={hover_z:.1f} mm..."
+                    print(f"        {msg_hover}", flush=True)
+                    self.bot.move_to(rx, ry, hover_z, r_angle, mode=movl_mode, wait=True)
+                    time.sleep(0.3)
+
+                    # 4. Strictly Linear Vertical Descent downwards onto spine at Z ≈ 3.0 mm (ZERO horizontal push)
+                    msg_4 = f"Descending vertically downwards onto spine at Z={target_pick_z:.1f} mm..."
+                    print(f"  [4/8] {msg_4}", flush=True)
+                    if update_ui:
+                        update_ui(msg_4, stage_num=4)
+                    self.bot.move_to(rx, ry, target_pick_z, r_angle, mode=movl_mode, wait=True)
+                    time.sleep(0.4)
+                else:
+                    # Shelf Spine: Preserve exact shelf retrieval sequence untouched
+                    msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm..."
+                    print(f"  [3/8] {msg_3}", flush=True)
+                    if update_ui:
+                        update_ui(msg_3, stage_num=3)
+                    self.bot.move_to(rx, ry, z_max_shelf, r_angle, wait=True)
+                    time.sleep(0.3)
+
+                    msg_4 = f"Descending vertically down onto spine at Z={rz:.1f} mm..."
+                    print(f"  [4/8] {msg_4}", flush=True)
+                    if update_ui:
+                        update_ui(msg_4, stage_num=4)
+                    self.bot.move_to(rx, ry, rz, r_angle, wait=True)
+                    time.sleep(0.4)
 
                 # 5. Clamp gripper (full pressure dwell for tight grip)
                 msg_5 = f"Clamping jaws firmly on spine (full pressure dwell)..."
@@ -245,12 +278,22 @@ class DobotController:
                 time.sleep(1.2)
 
                 # 6. Strictly Vertical Extraction: Lift book straight up using J2 to Maximum Height
-                msg_6 = f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2..."
-                print(f"  [6/8] {msg_6}", flush=True)
-                if update_ui:
-                    update_ui(msg_6, stage_num=6)
-                self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
-                time.sleep(0.3)
+                if not is_spine:
+                    msg_6 = f"Extracting book straight up to clearance Z={hover_z:.0f} mm..."
+                    print(f"  [6/8] {msg_6}", flush=True)
+                    if update_ui:
+                        update_ui(msg_6, stage_num=6)
+                    self.bot.move_to(rx, ry, hover_z, r_angle, mode=movl_mode, wait=True)
+                    time.sleep(0.2)
+                    self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
+                    time.sleep(0.3)
+                else:
+                    msg_6 = f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2..."
+                    print(f"  [6/8] {msg_6}", flush=True)
+                    if update_ui:
+                        update_ui(msg_6, stage_num=6)
+                    self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
+                    time.sleep(0.3)
 
                 # 7. Transfer to Drop Zone at Maximum Height & Drop directly
                 msg_7 = f"Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.1f} mm..."

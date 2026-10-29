@@ -158,15 +158,41 @@ def execute_full_retrieve_and_drop(bot, rx, ry, rz, target_r_deg, drop_pose, upd
     notify(2, 8, f"Pre-rotating gripper to R={target_r_deg:.1f}° at maximum height...")
     bot.move_to(cur.x, cur.y, transit_z, target_r_deg, wait=True)
 
-    # 3. Transit overhead to target (rx, ry) strictly at Maximum Height
-    notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm at maximum height...")
-    bot.move_to(rx, ry, z_max_shelf, target_r_deg, wait=True)
-    time.sleep(0.3)
+    try:
+        import pydobotplus.dobotplus as dp
+        movl_mode = dp.MODE_PTP.MOVL_XYZ
+    except Exception:
+        movl_mode = None
 
-    # 4. Strictly Vertical Descent straight down into book spine (NO horizontal drift)
-    notify(4, 8, f"Descending vertically straight down onto book spine at Z={rz:.1f} mm...")
-    bot.move_to(rx, ry, rz, target_r_deg, wait=True)
-    time.sleep(0.4)
+    is_shelf = (rz >= 60.0)
+
+    if not is_shelf:
+        # Scattered Book: Target height is at book surface Z ≈ 3.0 mm (verified in DobotStudio)
+        target_pick_z = 3.0 if rz < 3.0 else float(min(rz, 35.0))
+        hover_z = target_pick_z + 47.0
+        transit_overhead_z = float(min(z_max_shelf, 130.0))
+
+        notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {transit_overhead_z:.1f}) mm at maximum height...")
+        bot.move_to(rx, ry, transit_overhead_z, target_r_deg, wait=True)
+        time.sleep(0.2)
+
+        print(f"      Hovering directly above book spine at Z={hover_z:.1f} mm...", flush=True)
+        bot.move_to(rx, ry, hover_z, target_r_deg, mode=movl_mode, wait=True)
+        time.sleep(0.3)
+
+        notify(4, 8, f"Descending vertically downwards onto book spine at Z={target_pick_z:.1f} mm...")
+        bot.move_to(rx, ry, target_pick_z, target_r_deg, mode=movl_mode, wait=True)
+        time.sleep(0.4)
+    else:
+        # 3. Transit overhead to target (rx, ry) strictly at Maximum Height
+        notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm at maximum height...")
+        bot.move_to(rx, ry, z_max_shelf, target_r_deg, wait=True)
+        time.sleep(0.3)
+
+        # 4. Strictly Vertical Descent straight down into book spine (NO horizontal drift)
+        notify(4, 8, f"Descending vertically straight down onto book spine at Z={rz:.1f} mm...")
+        bot.move_to(rx, ry, rz, target_r_deg, wait=True)
+        time.sleep(0.4)
 
     # 5. Clamp pneumatic jaws firmly onto spine (full pressure dwell for tight grip)
     notify(5, 8, "Clamping pneumatic jaws firmly onto spine (full pressure dwell)...")
@@ -174,9 +200,16 @@ def execute_full_retrieve_and_drop(bot, rx, ry, rz, target_r_deg, drop_pose, upd
     time.sleep(1.2)
 
     # 6. Strictly Vertical Extraction: Lift book straight up using J2 to Maximum Height
-    notify(6, 8, f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2...")
-    bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
-    time.sleep(0.3)
+    if not is_shelf:
+        notify(6, 8, f"Extracting book straight up to clearance Z={hover_z:.0f} mm...")
+        bot.move_to(rx, ry, hover_z, target_r_deg, mode=movl_mode, wait=True)
+        time.sleep(0.2)
+        bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
+        time.sleep(0.3)
+    else:
+        notify(6, 8, f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2...")
+        bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
+        time.sleep(0.3)
 
     # 7. Transfer to Drop Zone at Maximum Height & Drop at Maximum Height
     notify(7, 8, f"Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.0f} mm...")

@@ -404,47 +404,117 @@ def refine_obb_with_sam(img, corners, return_contour=False):
         return (order_corners_clockwise(corners), None) if return_contour else order_corners_clockwise(corners)
 
 
-def extract_refined_pick_edge(refined_corners, pick_location="mid"):
+def find_spine_edge_endpoints(img, corners, query_title=None):
+    """
+    Identifies the spine edge endpoints [p1, p2] of a scattered book.
+    In standard book binding, the spine is ALWAYS along one of the two long edges.
+    Evaluates both long edges with fast OCR to match title text when available,
+    falling back to standard geometry (front-facing edge if horizontal, left edge if vertical).
+    """
+    ordered = order_corners_clockwise(corners)
+    tl, tr, br, bl = ordered
+
+    len_top = float(np.linalg.norm(tr - tl))
+    len_bottom = float(np.linalg.norm(bl - br))
+    len_left = float(np.linalg.norm(tl - bl))
+    len_right = float(np.linalg.norm(br - tr))
+
+    horiz_len = (len_top + len_bottom) / 2.0
+    vert_len = (len_left + len_right) / 2.0
+
+    if horiz_len >= vert_len:
+        # Long edges are bottom and top
+        # Bottom edge faces towards the camera/robot; top edge is in the back
+        candidates = [
+            ("bottom", bl, br, len_bottom),
+            ("top", tl, tr, len_top),
+        ]
+    else:
+        # Long edges are left and right
+        # Left edge is standard book spine; right edge is fore-edge
+        candidates = [
+            ("left", tl, bl, len_left),
+            ("right", tr, br, len_right),
+        ]
+
+    # Try quick strip OCR if image is provided to verify which edge has the spine title
+    if img is not None and query_title:
+        try:
+            from shared.ocr_reader import get_shared_ocr_reader, compute_title_similarity
+            reader = get_shared_ocr_reader(verbose=False)
+            best_sim = -1.0
+            best_cand = None
+            center = np.mean(ordered, axis=0)
+
+            for name, p1, p2, l_edge in candidates:
+                v = (p2 - p1) / max(l_edge, 1e-4)
+                n = np.array([-v[1], v[0]])
+                mid = (p1 + p2) / 2.0
+                if np.dot(center - mid, n) < 0:
+                    n = -n
+                # 40px strip into the book edge
+                strip_poly = np.array([p1, p2, p2 + 40 * n, p1 + 40 * n], dtype=np.float32)
+                out_w = max(int(l_edge), 20)
+                out_h = 40
+                dst = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
+                M = cv2.getPerspectiveTransform(strip_poly, dst)
+                strip_warp = cv2.warpPerspective(img, M, (out_w, out_h))
+                txt_list = reader.readtext(strip_warp, detail=0)
+                txt = " ".join(txt_list)
+                sim = compute_title_similarity(txt, query_title)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_cand = (name, p1, p2, l_edge)
+
+            if best_sim >= 0.35 and best_cand is not None:
+                return best_cand[1], best_cand[2], best_cand[3], best_cand[0]
+        except Exception:
+            pass
+
+    return candidates[0][1], candidates[0][2], candidates[0][3], candidates[0][0]
+
+
+def extract_refined_pick_edge(refined_corners, pick_location="spine_mid", img=None, query_title=None):
     """
     Given 4 clockwise-ordered corners [tl, tr, br, bl] of a refined book target:
-    Calculates the robot pick edge (top/grasp edge), its pick point, angle, endpoints, and length.
-    pick_location: 'mid' (default, edge midpoint) or 'top_left' (top-left edge / corner).
+    Calculates the robot pick edge, its pick point, angle, endpoints, and length.
+    pick_location: 'spine_mid' (default, middle of spine edge), 'mid' (midpoint), or 'top_left'.
     """
     ordered = order_corners_clockwise(refined_corners)
     tl, tr, br, bl = ordered
-
-    dx = tr[0] - tl[0]
-    dy = tr[1] - tl[1]
-    angle_deg = float(np.degrees(np.arctan2(dy, dx)))
-    length_px = float(np.hypot(dx, dy))
-
     center = (float(np.mean(ordered[:, 0])), float(np.mean(ordered[:, 1])))
 
     if pick_location == "top_left":
+        p1, p2 = tl, tr
+        edge_len = float(np.linalg.norm(tr - tl))
         nominal_pt = np.array(tl, dtype=float)
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        angle_deg = float(np.degrees(np.arctan2(dy, dx)))
     else:
-        nominal_pt = np.array((tl + tr) / 2.0, dtype=float)
+        # Default: middle of the spine!
+        p1, p2, edge_len, edge_name = find_spine_edge_endpoints(img, ordered, query_title=query_title)
+        nominal_pt = np.array((p1 + p2) / 2.0, dtype=float)
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        angle_deg = float(np.degrees(np.arctan2(dy, dx)))
 
-    # Inset pick point slightly towards the book body/center to prevent
-    # background wall silhouette bleed and ensure firm gripper jaw contact
+    # Inset pick point slightly towards the book body/center to prevent background silhouette bleed
     cx, cy = center
     v_in = np.array([cx - nominal_pt[0], cy - nominal_pt[1]], dtype=float)
     dist_to_center = float(np.hypot(v_in[0], v_in[1]))
-    inset_px = min(35.0, max(15.0, dist_to_center * 0.08)) if dist_to_center > 0 else 0.0
+    inset_px = min(25.0, max(12.0, dist_to_center * 0.06)) if dist_to_center > 0 else 0.0
     pick_pt = nominal_pt + (v_in / max(dist_to_center, 1e-4)) * inset_px
 
-    d_top = length_px
-    d_side = float(np.hypot(br[0] - tr[0], br[1] - tr[1]))
-    is_short = (d_top <= d_side)
     normal_deg = float((angle_deg + 90.0 + 180.0) % 360.0 - 180.0)
 
     return {
         "pick_point_2d": (float(pick_pt[0]), float(pick_pt[1])),
-        "pick_edge_endpoints": [(float(tl[0]), float(tl[1])), (float(tr[0]), float(tr[1]))],
+        "pick_edge_endpoints": [(float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))],
         "pick_edge_angle_deg": angle_deg,
         "grasp_approach_angle_deg": normal_deg,
-        "pick_edge_length_px": length_px,
-        "is_short_edge": is_short,
+        "pick_edge_length_px": edge_len,
+        "is_short_edge": False,
         "center_2d": center,
     }
 
@@ -455,39 +525,52 @@ def refine_obbs_with_sam(img, corners_list, return_contours=False):
     return results
 
 
-def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
+def refine_pickup_point_with_sam(img, corners, pick_location="spine_mid", query_title=None):
     """
     Fast SAM-based pickup point and grasp edge refinement:
     Instead of segmenting the whole book cover and fitting a 4-corner polygon,
-    this focuses SAM specifically on the grasp edge / top-left corner.
+    this focuses SAM specifically on the grasp edge (middle of spine).
 
-    1. Determines top grasp edge and nominal pickup coordinates from YOLO OBB corners.
-    2. Crops a tight ROI around the pick edge (not the whole book).
-    3. Prompts SAM at the pick zone to extract the precise physical edge line.
-    4. Computes sub-pixel pick point, grasp alignment angle, and perpendicular approach vector.
+    1. Determines true spine edge and nominal pickup coordinates (middle of spine).
+    2. Crops a tight ROI around the spine pick edge.
+    3. Prompts SAM at the spine pick zone to extract the precise physical edge line.
+    4. Computes sub-pixel pick point at the middle of the spine, grasp alignment angle, and perpendicular approach vector.
     """
     if corners is None or len(corners) != 4:
         return None
 
     ordered = order_corners_clockwise(corners)
     tl, tr, br, bl = ordered
-
-    dx = tr[0] - tl[0]
-    dy = tr[1] - tl[1]
-    yolo_angle = float(np.degrees(np.arctan2(dy, dx)))
-    edge_len = float(np.hypot(dx, dy))
-    v_line = np.array([dx, dy]) / max(edge_len, 1e-4)
-
-    nominal_pick = tl if pick_location == "top_left" else (tl + tr) / 2.0
     center_2d = (float(np.mean(ordered[:, 0])), float(np.mean(ordered[:, 1])))
 
+    if pick_location == "top_left":
+        p1, p2 = tl, tr
+        edge_len = float(np.linalg.norm(tr - tl))
+        nominal_pick = tl
+    else:
+        # Default: middle of the spine!
+        p1, p2, edge_len, edge_name = find_spine_edge_endpoints(img, ordered, query_title=query_title)
+        nominal_pick = (p1 + p2) / 2.0
+
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    yolo_angle = float(np.degrees(np.arctan2(dy, dx)))
+    v_line = np.array([dx, dy]) / max(edge_len, 1e-4)
+
+    # Inset nominal fallback slightly into the book
+    cx, cy = center_2d
+    v_in = np.array([cx - nominal_pick[0], cy - nominal_pick[1]], dtype=float)
+    dist_to_c = float(np.hypot(v_in[0], v_in[1]))
+    inset_px = min(25.0, max(12.0, dist_to_c * 0.06)) if dist_to_c > 0 else 0.0
+    fallback_pick = nominal_pick + (v_in / max(dist_to_c, 1e-4)) * inset_px
+
     fallback_result = {
-        "pick_point_2d": (float(nominal_pick[0]), float(nominal_pick[1])),
-        "pick_edge_endpoints": [(float(tl[0]), float(tl[1])), (float(tr[0]), float(tr[1]))],
+        "pick_point_2d": (float(fallback_pick[0]), float(fallback_pick[1])),
+        "pick_edge_endpoints": [(float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))],
         "pick_edge_angle_deg": yolo_angle,
         "grasp_approach_angle_deg": float((yolo_angle + 90.0 + 180.0) % 360.0 - 180.0),
         "pick_edge_length_px": edge_len,
-        "is_short_edge": (edge_len <= np.hypot(br[0] - tr[0], br[1] - tr[1])),
+        "is_short_edge": False,
         "center_2d": center_2d,
         "pick_contour": None,
         "method": "yolo_geometric",
@@ -500,21 +583,18 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
     try:
         img_h, img_w = img.shape[:2]
 
-        # Inward prompt point located firmly on book cover near grasp edge
-        if pick_location == "top_left":
-            pt_prompt = tl + 0.12 * (tr - tl) + 0.08 * (bl - tl)
-        else:
-            pt_prompt = (tl + tr) / 2.0 + 0.08 * ((bl + br) / 2.0 - (tl + tr) / 2.0)
+        # Inward prompt point located on the spine edge
+        pt_prompt = nominal_pick + (v_in / max(dist_to_c, 1e-4)) * (inset_px * 0.8)
 
-        # Tight ROI around pick edge only (not whole book)
-        cx = (tl[0] + tr[0]) / 2.0
-        cy = (tl[1] + tr[1]) / 2.0
+        # Tight ROI around spine edge only (not whole book)
+        cx_e = (p1[0] + p2[0]) / 2.0
+        cy_e = (p1[1] + p2[1]) / 2.0
         half_box = max(int(edge_len * 0.70), 50)
 
-        x0 = max(0, int(cx - half_box))
-        y0 = max(0, int(cy - half_box))
-        x1 = min(img_w, int(cx + half_box))
-        y1 = min(img_h, int(cy + half_box))
+        x0 = max(0, int(cx_e - half_box))
+        y0 = max(0, int(cy_e - half_box))
+        x1 = min(img_w, int(cx_e + half_box))
+        y1 = min(img_h, int(cy_e + half_box))
 
         roi = img[y0:y1, x0:x1]
         if roi.size == 0 or roi.shape[0] < 10 or roi.shape[1] < 10:
@@ -540,9 +620,9 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
         global_cnt = c_largest + np.array([x0, y0], dtype=np.int32)
         cnt_pts = global_cnt.reshape(-1, 2).astype(np.float32)
 
-        # Distance from points to nominal grasp line (tl -> tr)
+        # Distance from points to nominal grasp line (p1 -> p2)
         n_line = np.array([-v_line[1], v_line[0]])
-        dists_to_line = np.abs(np.dot(cnt_pts - tl, n_line))
+        dists_to_line = np.abs(np.dot(cnt_pts - p1, n_line))
         edge_pts = cnt_pts[dists_to_line < 25.0]
 
         if len(edge_pts) >= 5:
@@ -553,18 +633,13 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
         else:
             refined_angle = yolo_angle
 
-        # True contact pick point on the physical edge, inset slightly towards center to avoid background wall bleed
-        if pick_location == "top_left":
-            dists = np.hypot(cnt_pts[:, 0] - tl[0], cnt_pts[:, 1] - tl[1])
-            best_pt = cnt_pts[np.argmin(dists)]
-        else:
-            dists = np.hypot(cnt_pts[:, 0] - nominal_pick[0], cnt_pts[:, 1] - nominal_pick[1])
-            best_pt = cnt_pts[np.argmin(dists)]
+        # True contact pick point on the physical edge, at the middle of the spine
+        dists = np.hypot(cnt_pts[:, 0] - nominal_pick[0], cnt_pts[:, 1] - nominal_pick[1])
+        best_pt = cnt_pts[np.argmin(dists)]
 
-        cx, cy = center_2d
         v_in = np.array([cx - best_pt[0], cy - best_pt[1]], dtype=float)
         dist_to_c = float(np.hypot(v_in[0], v_in[1]))
-        inset_px = min(30.0, max(12.0, dist_to_c * 0.08)) if dist_to_c > 0 else 0.0
+        inset_px = min(25.0, max(12.0, dist_to_c * 0.06)) if dist_to_c > 0 else 0.0
         inset_pt = best_pt + (v_in / max(dist_to_c, 1e-4)) * inset_px
 
         pick_u, pick_v = float(inset_pt[0]), float(inset_pt[1])
@@ -572,11 +647,11 @@ def refine_pickup_point_with_sam(img, corners, pick_location="top_left"):
 
         return {
             "pick_point_2d": (pick_u, pick_v),
-            "pick_edge_endpoints": [(float(tl[0]), float(tl[1])), (float(tr[0]), float(tr[1]))],
+            "pick_edge_endpoints": [(float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))],
             "pick_edge_angle_deg": refined_angle,
             "grasp_approach_angle_deg": norm_deg,
             "pick_edge_length_px": edge_len,
-            "is_short_edge": (edge_len <= np.hypot(br[0] - tr[0], br[1] - tr[1])),
+            "is_short_edge": False,
             "center_2d": center_2d,
             "pick_contour": global_cnt,
             "method": "sam_fast_pickup",

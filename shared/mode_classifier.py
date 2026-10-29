@@ -79,89 +79,111 @@ def classify_mode(cv_image, verbose=True):
     if cv_image is None or cv_image.size == 0:
         return "spine", 0.50
 
-    tall_spines = []
-    flat_books = []
-
-    # 1. Detection checks on camera frame
-    img_check = cv_image
-
-    # 1a. Detect shelf spines first
-    tall_spines = []
-    try:
-        from spine_pipeline.detect_spine import detect_spines
-        _, spine_dets = detect_spines(image=img_check, conf_threshold=0.25)
-        for d in spine_dets:
-            c = d["corners"]
-            w_ext = float(np.ptp(c[:, 0]))
-            h_ext = float(np.ptp(c[:, 1]))
-            # Shelf spines are vertically oriented (height > 1.10 * width)
-            if h_ext > 1.10 * w_ext and h_ext >= 50.0:
-                tall_spines.append(d)
-    except Exception as e:
-        if verbose:
-            print(f"[Mode Classifier] Spine check error: {e}", flush=True)
-
-    # 1b. Detect books and categorize upright vs flat
     upright_books = []
     flat_books = []
+
+    # 1. Primary detection: Detect books using Book YOLO model
     try:
         from scattered_pipeline.detect_scattered import detect_books
-        _, sc_dets = detect_books(image=img_check, conf_threshold=0.35)
+        _, sc_dets = detect_books(image=cv_image, conf_threshold=0.35)
         for d in sc_dets:
+            c = d["corners"]
+            dx = float(np.ptp(c[:, 0]))
+            dy = float(np.ptp(c[:, 1]))
             w_box = float(min(d['width_px'], d['height_px']))
             h_box = float(max(d['width_px'], d['height_px']))
             aspect = h_box / max(w_box, 1.0)
-            ang = abs(float(d.get('obb_angle', 0.0)))
-            is_upright = (aspect >= 1.5) or (ang <= 30.0 or ang >= 150.0 or abs(ang - 90.0) <= 20.0)
+            cx, cy = d["center"]
+            y_top = float(np.min(c[:, 1]))
 
-            # Check if this book candidate overlaps an already identified shelf spine
-            sp_cx, sp_cy = d["center"]
-            overlap = False
-            for sp in tall_spines:
-                scx, scy = sp["center"]
-                if np.hypot(sp_cx - scx, sp_cy - scy) < 150.0:
-                    overlap = True
-                    break
-                fc = d.get("obb_corners")
-                if fc is not None and cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(scx), float(scy)), False) >= 0:
-                    overlap = True
-                    break
+            # Upright shelf book criteria:
+            # - Must be tall in image (dy >= 350 px in 1080p)
+            # - Must reach up into the shelf elevation (y_top < 550 px)
+            # - Must have vertical span much larger than horizontal span (dy >= 1.8 * dx)
+            # - Must have high aspect ratio (aspect >= 2.0)
+            is_tall_shelf = (dy >= 350.0 and y_top < 550.0 and dy >= 1.8 * dx and aspect >= 2.0)
 
-            if overlap or is_upright:
+            # Flat surface book criteria:
+            # - Horizontal span wider than vertical span (dx >= 1.15 * dy)
+            # - Wide cover face visible (w_box >= 170 px and aspect <= 2.2)
+            # - Desk surface location (cy > 750 or y_top > 550) with dy < 350
+            # - Any book not meeting strict upright shelf criteria
+            is_flat_desk = (dx >= 1.15 * dy) or (w_box >= 170.0 and aspect <= 2.2) or (cy > 750.0 and dy < 350.0) or (y_top > 550.0 and not is_tall_shelf)
+
+            if is_tall_shelf and not is_flat_desk:
                 upright_books.append(d)
             else:
                 flat_books.append(d)
     except Exception as e:
         if verbose:
-            print(f"[Mode Classifier] Scattered check error: {e}", flush=True)
+            print(f"[Mode Classifier] Book detection check error: {e}", flush=True)
 
-    # 2. Arrangement determination
-    n_spines = len(tall_spines)
-    n_upright = len(upright_books)
-    n_scattered = len(flat_books)
+    # 2. Check for shelf spines (only count true vertical shelf spines, not desk floor slices)
+    tall_spines = []
+    try:
+        from spine_pipeline.detect_spine import detect_spines
+        _, spine_dets = detect_spines(image=cv_image, conf_threshold=0.35)
+        for d in spine_dets:
+            c = d["corners"]
+            dx = float(np.ptp(c[:, 0]))
+            dy = float(np.ptp(c[:, 1]))
+            cx, cy = d["center"]
+            y_top = float(np.min(c[:, 1]))
 
-    # When vertical shelf spines or upright standing books are present, scene is SPINE arrangement
-    if n_spines >= 1 or n_upright >= 1:
-        total_standing = max(n_spines, n_upright)
-        if n_scattered >= 2 and n_scattered > total_standing:
-            mode = "mixed"
-            conf = 0.90
-            if verbose:
-                print(f"[Mode Classifier] Detected {total_standing} upright book/spine(s) AND {n_scattered} flat surface book(s). Scene is MIXED -> Mode set to: 'MIXED'", flush=True)
-            return mode, conf
-        else:
-            mode = "spine"
-            conf = 0.95
-            if verbose:
-                print(f"[Mode Classifier] Detected {total_standing} upright shelf book/spine(s). Mode set to: 'SPINE'", flush=True)
-            return mode, conf
+            # A real shelf spine is a tall vertical column reaching shelf height
+            if dy >= 350.0 and dy >= 2.5 * dx and y_top < 550.0 and cy < 820.0:
+                # Must not overlap or be inside any detected flat book
+                overlap_flat = False
+                for fb in flat_books:
+                    fc = fb["corners"]
+                    fcx, fcy = fb["center"]
+                    if np.hypot(cx - fcx, cy - fcy) < 160.0:
+                        overlap_flat = True
+                        break
+                    if cv2.pointPolygonTest(np.array(fc, dtype=np.float32), (float(cx), float(cy)), False) >= 0:
+                        overlap_flat = True
+                        break
 
-    # Desk-only scattered scene (no spines or upright books, only flat books)
-    if n_scattered >= 1:
+                # Must not duplicate an already counted upright book
+                overlap_upright = False
+                for ub in upright_books:
+                    ucx, ucy = ub["center"]
+                    if np.hypot(cx - ucx, cy - ucy) < 140.0:
+                        overlap_upright = True
+                        break
+
+                if not overlap_flat and not overlap_upright:
+                    tall_spines.append(d)
+    except Exception as e:
+        if verbose:
+            print(f"[Mode Classifier] Spine check error: {e}", flush=True)
+
+    # 3. Scene arrangement determination
+    n_upright = len(upright_books) + len(tall_spines)
+    n_flat = len(flat_books)
+
+    # When both upright shelf books/spines AND flat surface books are present -> MIXED arrangement
+    if n_upright >= 1 and n_flat >= 1:
+        mode = "mixed"
+        conf = 0.95
+        if verbose:
+            print(f"[Mode Classifier] Detected {n_upright} upright shelf book/spine(s) AND {n_flat} flat surface book(s). Mode set to: 'MIXED'", flush=True)
+        return mode, conf
+
+    # Only flat surface books detected on desk -> SCATTERED arrangement
+    if n_flat >= 1 and n_upright == 0:
         mode = "scattered"
         conf = 0.95
         if verbose:
-            print(f"[Mode Classifier] Detected 0 vertical spines and {n_scattered} flat book(s). Mode set to: 'SCATTERED'", flush=True)
+            print(f"[Mode Classifier] Detected {n_flat} flat surface book(s) and 0 upright shelf spines. Mode set to: 'SCATTERED'", flush=True)
+        return mode, conf
+
+    # Only upright shelf spines detected -> SPINE arrangement
+    if n_upright >= 1 and n_flat == 0:
+        mode = "spine"
+        conf = 0.95
+        if verbose:
+            print(f"[Mode Classifier] Detected {n_upright} upright shelf spine(s) and 0 flat surface books. Mode set to: 'SPINE'", flush=True)
         return mode, conf
 
     # Fallback to tiny classifier if geometry is inconclusive
