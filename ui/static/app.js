@@ -1,286 +1,255 @@
-// ==========================================================================
-// Antigravity BookBot — Frontend Logic & WebSocket/REST Client
-// ==========================================================================
+/**
+ * ============================================================================
+ * OPERATOR UI — CLIENT LOGIC & REST INTERFACE
+ * ============================================================================
+ */
 
 document.addEventListener('DOMContentLoaded', () => {
   // UI Elements
-  const queryInput = document.getElementById('target-query-input');
-  const runBtn = document.getElementById('run-detection-btn');
-  const executeDobotBtn = document.getElementById('execute-dobot-btn');
-  const catalogChips = document.getElementById('catalog-chips');
-  const modeSelector = document.getElementById('mode-selector');
-  const viewportImg = document.getElementById('main-viewport-img');
-  const viewportLoader = document.getElementById('viewport-loader');
-  const loaderStatus = document.getElementById('loader-status');
-  const toggleViewBtn = document.getElementById('toggle-view-btn');
-  const toggleRawBtn = document.getElementById('toggle-raw-btn');
-  const canvasModeBadge = document.getElementById('canvas-mode-badge');
-  const hudTitle = document.getElementById('hud-title');
-  const hudCoords = document.getElementById('hud-coords');
+  const queryInput = document.getElementById('query-input');
+  const findBtn = document.getElementById('find-target-btn');
+  const findSpinner = document.getElementById('find-spinner');
+  const findBtnText = document.getElementById('find-btn-text');
 
-  // Metrics Elements
-  const mPickPoint = document.getElementById('m-pick-point');
-  const mPickType = document.getElementById('m-pick-type');
-  const mGraspAngle = document.getElementById('m-grasp-angle');
-  const mAngleNote = document.getElementById('m-angle-note');
-  const mSize = document.getElementById('m-size');
-  const mConf = document.getElementById('m-conf');
-  const mMatchBadge = document.getElementById('telemetry-match-badge');
-  const xyzX = document.getElementById('xyz-x');
-  const xyzY = document.getElementById('xyz-y');
-  const xyzZ = document.getElementById('xyz-z');
-  const dobotStatusMsg = document.getElementById('dobot-status-msg');
+  const sendArmBtn = document.getElementById('send-arm-btn');
+  const armSpinner = document.getElementById('arm-spinner');
+  const armBtnText = document.getElementById('arm-btn-text');
 
-  // Stepper Elements
-  const stepCards = [
-    document.getElementById('step-mode'),
-    document.getElementById('step-capture'),
-    document.getElementById('step-detect'),
-    document.getElementById('step-ocr'),
-    document.getElementById('step-sam'),
-    document.getElementById('step-robot')
-  ];
+  const modeTabs = document.querySelectorAll('.mode-tab');
+  const catalogChips = document.querySelectorAll('.chip');
+  const headerActiveMode = document.getElementById('header-active-mode');
+
+  // Telemetry Elements
+  const telemetryBadge = document.getElementById('telemetry-badge');
+  const tTitle = document.getElementById('t-title');
+  const tMode = document.getElementById('t-mode');
+  const tConf = document.getElementById('t-conf');
+  const tSim = document.getElementById('t-sim');
+  const camX = document.getElementById('cam-x');
+  const camY = document.getElementById('cam-y');
+  const camZ = document.getElementById('cam-z');
+  const robX = document.getElementById('rob-x');
+  const robY = document.getElementById('rob-y');
+  const robZ = document.getElementById('rob-z');
+  const tPickNote = document.getElementById('t-pick-note');
+  const streamLockBadge = document.getElementById('stream-lock-badge');
+  const streamBannerText = document.getElementById('stream-banner-text');
+
+  const motionProgress = document.getElementById('motion-progress');
+  const motionStatusText = document.getElementById('motion-status-text');
 
   // State
-  let currentSampleKey = 'shelf_spine';
   let currentMode = 'auto';
-  let currentRawImage = '';
-  let currentAnnotatedImage = '';
-  let lastTargetData = null;
+  let lastFoundTarget = null;
 
-  // Initialize System Status
-  async function fetchStatus() {
-    try {
-      const res = await fetch('/api/status');
-      const data = await res.json();
-
-      // Update Dobot port badge
-      if (data.dobot_ports && data.dobot_ports.length > 0) {
-        document.getElementById('dobot-label').textContent = `Dobot Magician (${data.dobot_ports[0].device})`;
-        document.getElementById('status-arm').classList.add('active');
-      } else {
-        document.getElementById('dobot-label').textContent = 'Dobot Magician (Simulated)';
-      }
-
-      // Update camera status
-      if (data.camera_connected) {
-        document.getElementById('camera-label').textContent = 'RealSense D435i (Live)';
-      } else {
-        document.getElementById('camera-label').textContent = 'RealSense (Offline - Benchmark Mode)';
-      }
-    } catch (err) {
-      console.warn('Status fetch error:', err);
-    }
-  }
-
-  // Animate Stepper
-  function setStepperStage(stageIndex) {
-    stepCards.forEach((card, idx) => {
-      card.classList.remove('active', 'completed');
-      if (idx < stageIndex) {
-        card.classList.add('completed');
-      } else if (idx === stageIndex) {
-        card.classList.add('active');
-      }
+  // Handle Mode Tabs
+  modeTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      modeTabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentMode = tab.dataset.mode;
+      headerActiveMode.textContent = currentMode.toUpperCase() + (currentMode === 'auto' ? ' ADAPTIVE' : '');
     });
-  }
-
-  // Handle Catalog Chip Selection
-  catalogChips.addEventListener('click', (e) => {
-    const chip = e.target.closest('.chip');
-    if (!chip) return;
-
-    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-    chip.classList.add('active');
-
-    const title = chip.dataset.title;
-    const sample = chip.dataset.sample;
-
-    queryInput.value = title;
-    currentSampleKey = sample;
-
-    // Trigger detection run
-    runDetection();
   });
 
-  // Handle Mode Selection
-  modeSelector.addEventListener('click', (e) => {
-    const btn = e.target.closest('.seg-btn');
-    if (!btn) return;
+  // Handle Preset Catalog Chips
+  catalogChips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      const query = chip.dataset.query;
+      const mode = chip.dataset.mode;
+      queryInput.value = query;
 
-    document.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentMode = btn.dataset.mode;
+      // Match mode tab
+      modeTabs.forEach(tab => {
+        if (tab.dataset.mode === mode) {
+          tab.click();
+        }
+      });
+
+      // Quick trigger find
+      triggerFind();
+    });
   });
 
-  // Handle Overlay Toggles
-  toggleViewBtn.addEventListener('click', () => {
-    toggleViewBtn.classList.add('active');
-    toggleRawBtn.classList.remove('active');
-    if (currentAnnotatedImage) {
-      viewportImg.src = currentAnnotatedImage;
+  // Scan & Locate Target
+  findBtn.addEventListener('click', triggerFind);
+
+  queryInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      triggerFind();
     }
   });
 
-  toggleRawBtn.addEventListener('click', () => {
-    toggleRawBtn.classList.add('active');
-    toggleViewBtn.classList.remove('active');
-    if (currentRawImage) {
-      viewportImg.src = currentRawImage;
-    }
-  });
-
-  // Run Pipeline Detection
-  async function runDetection() {
+  async function triggerFind() {
     const query = queryInput.value.trim();
-    const sourceRadio = document.querySelector('input[name="input-source"]:checked');
-    const source = sourceRadio ? sourceRadio.value : 'sample';
+    if (!query) {
+      queryInput.focus();
+      return;
+    }
 
-    viewportLoader.classList.remove('hidden');
-    loaderStatus.textContent = '1/6 Classifying arrangement mode (~2ms)...';
-    setStepperStage(0);
-
-    setTimeout(() => {
-      loaderStatus.textContent = '2/6 Capturing 1080p aligned RGB-D frame...';
-      setStepperStage(1);
-    }, 150);
-
-    setTimeout(() => {
-      loaderStatus.textContent = '3/6 Running YOLO OBB candidate detection...';
-      setStepperStage(2);
-    }, 350);
+    // Set Loading UI
+    findBtn.disabled = true;
+    findSpinner.style.display = 'inline-block';
+    findBtnText.textContent = 'SCANNING & REFINING...';
+    telemetryBadge.className = 'status-badge standby';
+    telemetryBadge.textContent = 'SCANNING';
+    motionProgress.style.width = '20%';
+    motionStatusText.textContent = `Analyzing optical frame for: "${query}"...`;
 
     try {
-      loaderStatus.textContent = '4/6 RapidOCR orientation-aware title matching...';
-      setStepperStage(3);
-
-      const response = await fetch('/api/detect', {
+      const response = await fetch('/api/find', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          source: source,
-          sample_key: currentSampleKey,
-          query: query,
-          mode: currentMode
-        })
+        body: JSON.stringify({ query: query, mode: currentMode })
       });
 
       const data = await response.json();
 
-      if (!data.success || !data.target) {
-        viewportLoader.classList.add('hidden');
-        alert('No confident target match found for query: ' + query);
-        return;
-      }
+      if (data.found) {
+        lastFoundTarget = data;
 
-      loaderStatus.textContent = '5/6 SAM high-precision edge refinement...';
-      setStepperStage(4);
+        // Update Telemetry Panel
+        telemetryBadge.className = 'status-badge locked';
+        telemetryBadge.textContent = 'TARGET LOCKED';
+        streamLockBadge.textContent = 'LOCKED';
+        streamLockBadge.style.color = 'var(--accent-green)';
+        streamBannerText.textContent = `TARGET LOCKED: "${data.title}" | DOBOT: (${data.robot_xyz[0]}, ${data.robot_xyz[1]}, ${data.robot_xyz[2]}) mm`;
 
-      lastTargetData = data.target;
-      currentRawImage = data.raw_image;
-      currentAnnotatedImage = data.annotated_image;
+        tTitle.textContent = data.title;
+        tMode.textContent = (data.mode || 'auto').toUpperCase();
+        tConf.textContent = `${Math.round((data.conf || 0.9) * 100)}%`;
+        tSim.textContent = `${Math.round((data.sim || 1.0) * 100)}%`;
 
-      // Update Viewport Image
-      viewportImg.src = currentAnnotatedImage;
+        if (data.cam_xyz && data.cam_xyz.length >= 3) {
+          camX.textContent = data.cam_xyz[0].toFixed(3);
+          camY.textContent = data.cam_xyz[1].toFixed(3);
+          camZ.textContent = data.cam_xyz[2].toFixed(3);
+        }
 
-      // Update Canvas Mode Badge
-      canvasModeBadge.textContent = `${data.mode.toUpperCase()} MODE (${(data.mode_conf * 100).toFixed(0)}%)`;
+        if (data.robot_xyz && data.robot_xyz.length >= 3) {
+          robX.textContent = data.robot_xyz[0].toFixed(1);
+          robY.textContent = data.robot_xyz[1].toFixed(1);
+          robZ.textContent = data.robot_xyz[2].toFixed(1);
+        }
 
-      // Update Locked HUD
-      hudTitle.textContent = data.target.text || query;
-      const pickX = data.target.pick_point_2d ? data.target.pick_point_2d[0] : data.target.top_edge_center_u;
-      const pickY = data.target.pick_point_2d ? data.target.pick_point_2d[1] : data.target.top_edge_center_v;
-      hudCoords.textContent = `Pick Point: (${pickX.toFixed(1)}, ${pickY.toFixed(1)}) px`;
+        tPickNote.textContent = data.pick_note || 'Upper spine, parallel grasp';
 
-      // Update Telemetry Metrics
-      mPickPoint.textContent = `(${pickX.toFixed(1)}, ${pickY.toFixed(1)}) px`;
-      
-      if (data.mode === 'scattered') {
-        mPickType.textContent = 'Top-Left Edge Point (Perpendicular Inward)';
+        // Enable Arm Execution
+        sendArmBtn.disabled = false;
+        motionProgress.style.width = '100%';
+        motionStatusText.textContent = `Target locked. Dobot ready at [X=${data.robot_xyz[0]}, Y=${data.robot_xyz[1]}, Z=${data.robot_xyz[2]}] mm.`;
+
       } else {
-        mPickType.textContent = 'Top Spine Edge Midpoint';
+        lastFoundTarget = null;
+        sendArmBtn.disabled = true;
+        telemetryBadge.className = 'status-badge error';
+        telemetryBadge.textContent = 'NOT FOUND';
+        streamLockBadge.textContent = 'NO MATCH';
+        streamLockBadge.style.color = 'var(--accent-red)';
+        streamBannerText.textContent = `No book found matching: "${query}". Check title spelling or camera view.`;
+
+        tTitle.textContent = 'None Found';
+        tMode.textContent = '\u2014';
+        tConf.textContent = '\u2014';
+        tSim.textContent = '\u2014';
+        camX.textContent = '0.000';
+        camY.textContent = '0.000';
+        camZ.textContent = '0.000';
+        robX.textContent = '0.0';
+        robY.textContent = '0.0';
+        robZ.textContent = '0.0';
+        tPickNote.textContent = 'No target detected.';
+
+        motionProgress.style.width = '0%';
+        motionStatusText.textContent = `No book candidates matched query "${query}".`;
       }
-
-      const graspAngle = data.target.grasp_approach_angle_deg || data.target.pick_edge_angle_deg || 0.0;
-      mGraspAngle.innerHTML = `${(data.target.pick_edge_angle_deg || 0.0).toFixed(1)}&deg;`;
-      mAngleNote.innerHTML = `Wrist Align: ${graspAngle.toFixed(1)}&deg;`;
-
-      const w = data.target.width_px || 0.0;
-      const h = data.target.height_px || data.target.pick_edge_length_px || 0.0;
-      mSize.textContent = `${w.toFixed(0)} × ${h.toFixed(0)} px`;
-
-      mConf.textContent = (data.target.conf || 0.0).toFixed(2);
-      mMatchBadge.textContent = `Match: ${(data.target.similarity || 1.0).toFixed(2)}`;
-
-      // Update 3D Coordinates
-      const xyz = data.target.xyz_pick_camera_frame || data.target.xyz_camera_frame || [-0.056, 0.011, 0.508];
-      xyzX.textContent = `${xyz[0] >= 0 ? '+' : ''}${xyz[0].toFixed(3)} m`;
-      xyzY.textContent = `${xyz[1] >= 0 ? '+' : ''}${xyz[1].toFixed(3)} m`;
-      xyzZ.textContent = `${xyz[2] >= 0 ? '+' : ''}${xyz[2].toFixed(3)} m`;
-
-      // Complete Stepper to Stage 5
-      setStepperStage(5);
-      dobotStatusMsg.textContent = `Target locked. Ready to execute Dobot pick at (${xyz[0].toFixed(3)}, ${xyz[1].toFixed(3)}, ${xyz[2].toFixed(3)}) m.`;
-
     } catch (err) {
-      console.error('Detection error:', err);
-      alert('Error communicating with detection server.');
+      console.error('API Find error:', err);
+      telemetryBadge.className = 'status-badge error';
+      telemetryBadge.textContent = 'API ERROR';
+      motionStatusText.textContent = 'Network or server error during scan.';
     } finally {
-      viewportLoader.classList.add('hidden');
+      findBtn.disabled = false;
+      findSpinner.style.display = 'none';
+      findBtnText.textContent = 'SCAN & LOCATE TARGET';
     }
   }
 
-  // Execute Dobot Magician Pick Sequence
-  async function executePick() {
-    if (!lastTargetData) {
-      alert('Please run target detection first to acquire 3D pick coordinates.');
-      return;
-    }
+  // Retrieve & Drop Command
+  sendArmBtn.addEventListener('click', async () => {
+    if (!lastFoundTarget || !lastFoundTarget.robot_xyz) return;
 
-    const xyz = lastTargetData.xyz_pick_camera_frame || lastTargetData.xyz_camera_frame || [-0.056, 0.011, 0.508];
-    const angle = lastTargetData.pick_edge_angle_deg || 0.0;
+    sendArmBtn.disabled = true;
+    findBtn.disabled = true;
+    armSpinner.style.display = 'inline-block';
+    armBtnText.textContent = 'EXECUTING RETRIEVAL...';
 
-    executeDobotBtn.disabled = true;
-    executeDobotBtn.style.opacity = '0.6';
-    dobotStatusMsg.textContent = 'Trajectory: Moving Dobot arm to hover point...';
+    // Progressive stage feedback
+    const stages = [
+      { progress: '15%', text: 'Stage 1/8: Elevating to Maximum Clearance (J2 Elevation)...' },
+      { progress: '30%', text: 'Stage 2/8: Pre-rotating Gripper Jaws Parallel to Spine...' },
+      { progress: '45%', text: 'Stage 3/8: Transiting Overhead to Target Coordinates...' },
+      { progress: '60%', text: 'Stage 4/8: Strictly Vertical Descent Straight onto Book Spine...' },
+      { progress: '75%', text: 'Stage 5/8: Clamping Pneumatic Jaws with Full Grip...' },
+      { progress: '85%', text: 'Stage 6/8: Lifting Book Clear of Bookshelf...' },
+      { progress: '95%', text: 'Stage 7/8: Transferring to Drop Zone Station...' },
+      { progress: '100%', text: 'Stage 8/8: Releasing Book & Retracting Arm to Standby...' }
+    ];
+
+    let stageIdx = 0;
+    const stageInterval = setInterval(() => {
+      if (stageIdx < stages.length) {
+        motionProgress.style.width = stages[stageIdx].progress;
+        motionStatusText.textContent = stages[stageIdx].text;
+        stageIdx++;
+      }
+    }, 1200);
 
     try {
-      const res = await fetch('/api/pick', {
+      const response = await fetch('/api/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ xyz: xyz, angle: angle })
+        headers: { 'Content-Type': 'application/json' }
       });
-      const data = await res.json();
 
-      setTimeout(() => {
-        dobotStatusMsg.textContent = 'Trajectory: Lowering suction cup onto book edge...';
-      }, 700);
+      const res = await response.json();
+      clearInterval(stageInterval);
 
-      setTimeout(() => {
-        dobotStatusMsg.textContent = 'Suction Pump: ACTIVATED (Vacuum Seal Locked)';
-      }, 1400);
-
-      setTimeout(() => {
-        dobotStatusMsg.textContent = 'Trajectory: Lifting book and retracting to safe waypoint...';
-      }, 2100);
-
-      setTimeout(() => {
-        dobotStatusMsg.textContent = `Pick Complete! ${data.message}`;
-        executeDobotBtn.disabled = false;
-        executeDobotBtn.style.opacity = '1';
-      }, 2800);
-
+      if (res.ok) {
+        motionProgress.style.width = '100%';
+        motionStatusText.textContent = 'SUCCESS: Book retrieved and deposited cleanly!';
+        telemetryBadge.className = 'status-badge locked';
+        telemetryBadge.textContent = 'COMPLETED';
+        armBtnText.textContent = 'RETRIEVE COMPLETE';
+        setTimeout(() => {
+          armBtnText.textContent = 'RETRIEVE & DROP BOOK';
+          sendArmBtn.disabled = false;
+          findBtn.disabled = false;
+        }, 3000);
+      } else {
+        motionProgress.style.width = '0%';
+        motionStatusText.textContent = `EXECUTION FAILED: ${res.error || 'Check Dobot physical connection.'}`;
+        armBtnText.textContent = 'RETRIEVE & DROP BOOK';
+        sendArmBtn.disabled = false;
+        findBtn.disabled = false;
+      }
     } catch (err) {
-      dobotStatusMsg.textContent = 'Dobot communication error: ' + err;
-      executeDobotBtn.disabled = false;
-      executeDobotBtn.style.opacity = '1';
+      clearInterval(stageInterval);
+      console.error('API Send error:', err);
+      motionProgress.style.width = '0%';
+      motionStatusText.textContent = 'Network or Dobot controller error.';
+      armBtnText.textContent = 'RETRIEVE & DROP BOOK';
+      sendArmBtn.disabled = false;
+      findBtn.disabled = false;
+    } finally {
+      armSpinner.style.display = 'none';
     }
-  }
-
-  runBtn.addEventListener('click', runDetection);
-  executeDobotBtn.addEventListener('click', executePick);
-
-  // Initial Boot
-  fetchStatus();
-  runDetection();
+  });
 });
+
+// Stream reconnection fallback
+function handleStreamError(img) {
+  setTimeout(() => {
+    img.src = '/video_feed?t=' + Date.now();
+  }, 2000);
+}

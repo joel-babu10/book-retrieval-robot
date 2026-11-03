@@ -49,7 +49,8 @@ class RealSenseCamera:
             config.enable_stream(rs.stream.color, self.color_width, self.color_height, rs.format.bgr8, self.fps)
             config.enable_stream(rs.stream.depth, self.depth_width, self.depth_height, rs.format.z16, self.fps)
 
-            print(f"[Camera] Starting RealSense pipeline ({self.color_width}x{self.color_height} color+depth, 30 FPS)...", flush=True)
+            if verbose:
+                print(f"[Camera] Starting RealSense pipeline ({self.color_width}x{self.color_height} color+depth, 30 FPS)...", flush=True)
             profile = self.pipeline.start(config)
 
             # Enable auto-exposure and auto-white-balance on color sensor
@@ -78,7 +79,7 @@ class RealSenseCamera:
             self.stop()
             raise RuntimeError(f"Failed to start RealSense camera: {e}")
 
-    def stop(self):
+    def stop(self, verbose=False):
         if self._started and self.pipeline is not None:
             try:
                 self.pipeline.stop()
@@ -86,7 +87,8 @@ class RealSenseCamera:
                 pass
             self.pipeline = None
             self._started = False
-            print("[Camera] RealSense pipeline stopped.", flush=True)
+            if verbose:
+                print("[Camera] RealSense pipeline stopped.", flush=True)
 
     def capture(self):
         """

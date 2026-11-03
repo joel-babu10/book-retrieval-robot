@@ -1,244 +1,94 @@
-"""
-ui/server.py
-----------------------------------------------------------------------------
-Flask Web API Server for the Autonomous Book Retrieval Robot UI.
-Exposes endpoints for automated mode selection, spine/scattered/mixed target
-detection, SAM geometric refinement, and Dobot Magician trajectory execution.
-"""
+"""Operator UI backend. Run: pip install flask opencv-python numpy && python server.py  ->  http://localhost:5000
 
-import os
-import sys
-import json
-import base64
+Hook your pipeline in pipeline.py (same folder) exposing:
+  find_target(query:str, mode:str) -> dict | None
+      {"title", "conf", "sim", "mode", "cam_xyz":[x,y,z] (m), "robot_xyz":[x,y,z] or None,
+       "pick_note", "frame": annotated BGR ndarray (optional)}
+  get_frame() -> annotated BGR ndarray (live view)
+  send_to_arm(robot_xyz) -> bool
+Missing pipeline.py -> demo data so the UI still runs.
+"""
+import time, threading
 from pathlib import Path
-import cv2
-import numpy as np
+import cv2, numpy as np
+from flask import Flask, Response, jsonify, request, send_from_directory
 
-# Ensure project root is in sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+try:
+    from pipeline import find_target, get_frame, send_to_arm
+    DEMO = False
+except ImportError:
+    DEMO = True
 
-from flask import Flask, jsonify, request, send_from_directory
-import torch
+    def get_frame():
+        img = np.full((484, 860, 3), (37, 29, 22), np.uint8)
+        cv2.putText(img, "DEMO FEED (pipeline.py not found)", (230, 250),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 190, 200), 2)
+        return img
 
-from shared.mode_classifier import classify_mode
-from spine_pipeline.find_target_spine import find_target_spine_image, find_target_spine_live
-from scattered_pipeline.find_target_scattered import find_target_scattered_image, find_target_scattered_live
-from mixed_pipeline.find_target_mixed import find_target_mixed_image, find_target_mixed_live
+    def find_target(query, mode):
+        time.sleep(0.6)
+        return {"title": query, "conf": 0.89, "sim": 1.0, "mode": "spine" if mode == "auto" else mode,
+                "cam_xyz": [0.090, -0.153, 0.419], "robot_xyz": None,
+                "pick_note": "Upper spine, centred on width"}
 
-app = Flask(__name__, static_folder="static", static_url_path="")
+    def send_to_arm(robot_xyz):
+        return False
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-SAMPLE_IMAGES = {
-    "shelf_spine": {
-        "title": "Shelf Spine (JavaServer Pages)",
-        "query": "JavaServer Pages",
-        "path": r"C:\Users\joelv\.gemini\antigravity-ide\brain\007729dc-2ebd-4814-b85d-052dceb435cf\.user_uploaded\media_1791955764515.jpg"
-    },
-    "stacked_mixed": {
-        "title": "Stacked / Wall Desk (Concepts of Database Management)",
-        "query": "Database Management",
-        "path": r"C:\Users\joelv\.gemini\antigravity-ide\brain\007729dc-2ebd-4814-b85d-052dceb435cf\.user_uploaded\media_1791955774876.jpg"
-    },
-    "scattered_flat": {
-        "title": "Scattered Flat (JavaServer Pages)",
-        "query": "JavaServer Pages",
-        "path": r"C:\Users\joelv\.gemini\antigravity-ide\brain\007729dc-2ebd-4814-b85d-052dceb435cf\.user_uploaded\media_1791955785260.jpg"
-    }
-}
+# Ensure static folder works whether running from root or elsewhere
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
+_lock = threading.Lock()
+_last = {"result": None}
 
 
-def image_to_base64(img_bgr):
-    """Encodes a BGR cv2 image to a base64 JPEG data URL."""
-    success, buffer = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not success:
-        return ""
-    b64_str = base64.b64encode(buffer).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64_str}"
-
-
-@app.route("/")
+@app.get("/")
 def index():
-    return send_from_directory("static", "index.html")
+    return send_from_directory(str(STATIC_DIR), "index.html")
 
 
-@app.route("/api/status", methods=["GET"])
-def get_system_status():
-    camera_ready = False
-    try:
-        import pyrealsense2 as rs
-        ctx = rs.context()
-        camera_ready = len(ctx.query_devices()) > 0
-    except Exception:
-        camera_ready = False
-
-    dobot_ports = []
-    try:
-        import serial.tools.list_ports
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            dobot_ports.append({"device": p.device, "description": p.description})
-    except Exception:
-        pass
-
-    catalog = []
-    try:
-        from shared.ocr_reader import _get_catalog
-        catalog = [b.get("title") for b in _get_catalog() if "title" in b]
-    except Exception:
-        catalog = ["JavaServer Pages", "Database Management", "Linear Algebra", "Probability & Random Processes"]
-
-    return jsonify({
-        "status": "online",
-        "device": DEVICE,
-        "cuda_available": torch.cuda.is_available(),
-        "camera_connected": camera_ready,
-        "dobot_ports": dobot_ports,
-        "catalog": catalog,
-        "samples": {k: {"title": v["title"], "query": v["query"]} for k, v in SAMPLE_IMAGES.items()}
-    })
+@app.get("/<path:filename>")
+def static_file(filename):
+    return send_from_directory(str(STATIC_DIR), filename)
 
 
-@app.route("/api/detect", methods=["POST"])
-def run_detection():
-    data = request.json or {}
-    source = data.get("source", "sample")  # 'sample' or 'live'
-    sample_key = data.get("sample_key", "shelf_spine")
-    query_title = data.get("query", "JavaServer Pages")
-    requested_mode = data.get("mode", "auto")
-
-    # 1. Acquire Image
-    cv_img = None
-    depth_frame = None
-    intrinsics = None
-
-    if source == "live":
-        try:
-            from input.camera import RealSenseCamera
-            with RealSenseCamera() as cam:
-                cv_img, depth_frame, intrinsics = cam.capture()
-            if cv_img is None:
-                return jsonify({"error": "Failed to capture frame from RealSense camera."}), 500
-        except Exception as e:
-            return jsonify({"error": f"Camera capture failed: {e}"}), 500
-    else:
-        sample_info = SAMPLE_IMAGES.get(sample_key, SAMPLE_IMAGES["shelf_spine"])
-        img_path = sample_info["path"]
-        if not os.path.exists(img_path):
-            return jsonify({"error": f"Sample image file not found: {img_path}"}), 404
-        cv_img = cv2.imread(img_path)
-
-    raw_base64 = image_to_base64(cv_img)
-
-    # 2. Automated Mode Selection (if auto)
-    classified_mode, mode_conf = classify_mode(cv_img, verbose=False)
-    active_mode = classified_mode if requested_mode == "auto" else requested_mode
-
-    # 3. Pipeline Execution
-    result = None
-    output_temp = ROOT_DIR / "ui" / "static" / "temp_result.jpg"
-    output_temp.parent.mkdir(parents=True, exist_ok=True)
-
-    if source == "live":
-        if active_mode == "spine":
-            result = find_target_spine_live(
-                target_title=query_title,
-                cv_image=cv_img,
-                depth_frame=depth_frame,
-                color_intrinsics=intrinsics,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-        elif active_mode == "scattered":
-            result = find_target_scattered_live(
-                query_title=query_title,
-                cv_image=cv_img,
-                depth_frame=depth_frame,
-                color_intrinsics=intrinsics,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-        else:
-            result = find_target_mixed_live(
-                query_title=query_title,
-                cv_image=cv_img,
-                depth_frame=depth_frame,
-                color_intrinsics=intrinsics,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-    else:
-        sample_path = SAMPLE_IMAGES.get(sample_key, {}).get("path")
-        if active_mode == "spine":
-            result = find_target_spine_image(
-                image_path=sample_path,
-                target_title=query_title,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-        elif active_mode == "scattered":
-            result = find_target_scattered_image(
-                image_path=sample_path,
-                query_title=query_title,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-        else:
-            result = find_target_mixed_image(
-                image_path=sample_path,
-                query_title=query_title,
-                output_path=str(output_temp),
-                refine_sam=True
-            )
-
-    annotated_base64 = ""
-    if output_temp.exists():
-        ann_img = cv2.imread(str(output_temp))
-        if ann_img is not None:
-            annotated_base64 = image_to_base64(ann_img)
-
-    # Clean serializable payload
-    def sanitize(obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        if isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        if isinstance(obj, dict):
-            return {k: sanitize(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [sanitize(v) for v in obj]
-        return obj
-
-    clean_result = sanitize(result) if result else None
-
-    return jsonify({
-        "success": clean_result is not None,
-        "mode": active_mode,
-        "mode_conf": float(mode_conf),
-        "target": clean_result,
-        "raw_image": raw_base64,
-        "annotated_image": annotated_base64
-    })
+def _mjpeg():
+    while True:
+        frame = get_frame()
+        if frame is not None:
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                yield b"--f\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+        time.sleep(1 / 15)
 
 
-@app.route("/api/pick", methods=["POST"])
-def execute_robot_pick():
-    data = request.json or {}
-    xyz = data.get("xyz", [-0.05, 0.0, 0.50])
-    angle = data.get("angle", 0.0)
-    is_spine = data.get("is_spine", False)
+@app.get("/video_feed")
+def video_feed():
+    return Response(_mjpeg(), mimetype="multipart/x-mixed-replace; boundary=f")
 
-    from robot.dobot_controller import get_dobot_controller
-    controller = get_dobot_controller()
-    pick_result = controller.execute_pick_sequence(xyz, grasp_angle_deg=angle, is_spine=is_spine)
 
-    return jsonify(pick_result)
+@app.post("/api/find")
+def api_find():
+    d = request.get_json(force=True)
+    query, mode = (d.get("query") or "").strip(), d.get("mode", "auto")
+    if not query:
+        return jsonify(error="empty query"), 400
+    with _lock:
+        res = find_target(query, mode)
+        if res is None:
+            return jsonify(found=False)
+        res = {k: v for k, v in res.items() if k != "frame"}
+        _last["result"] = res
+    return jsonify(found=True, **res)
+
+
+@app.post("/api/send")
+def api_send():
+    res = _last["result"]
+    if not res or res.get("robot_xyz") is None:
+        return jsonify(ok=False, error="no robot-frame target"), 400
+    return jsonify(ok=bool(send_to_arm(res["robot_xyz"])))
 
 
 if __name__ == "__main__":
-    print("[UI Server] Starting Autonomous Robot UI on http://localhost:5000", flush=True)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print(f"[Operator UI] Server starting at http://localhost:5000 (DEMO={DEMO})", flush=True)
+    app.run(host="0.0.0.0", port=5000, threaded=True)

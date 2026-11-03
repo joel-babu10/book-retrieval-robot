@@ -18,7 +18,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _model = None
 
 
-def get_model(model_path=None):
+def get_model(model_path=None, verbose=True):
     """Lazy-load the YOLO model once, reused across calls."""
     global _model
     if _model is None:
@@ -30,7 +30,8 @@ def get_model(model_path=None):
             else:
                 model_path = DEFAULT_MODEL_PATH
 
-        print(f"[Spine] Loading YOLO OBB model ({DEVICE}): {model_path}", flush=True)
+        if verbose:
+            print(f"[Spine] Loading YOLO OBB model ({DEVICE}): {model_path}", flush=True)
         _model = YOLO(model_path)
     return _model
 
