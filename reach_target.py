@@ -42,7 +42,11 @@ HOME_POSE = (200.0, 0.0, 160.0, 0.0)
 DEFAULT_DROP_POSE = [200.0, 0.0, 165.0, 0.0]  # Front drop zone at maximum height (X, Y, Z, R)
 DEFAULT_PORT = "COM7"
 W, H, FPS = 640, 480, 30
-DEFAULT_SPINE_ROTATION_DEG = 89.70  # Verified ground-truth from DobotStudio for target book (J1=89.70°, J4=0.0°)
+DEFAULT_SPINE_ROTATION_DEG = 88.10  # Verified ground-truth from DobotStudio for target book (J1=88.10°, J4=0.0°, R=88.10°)
+DEFAULT_ROTATION_BY_MODE = {
+    "spine": 88.1,
+    "scattered": 94.2,
+}
 TRANSIT_MAX_HEIGHT_Z = 165.0       # Maximum safe ceiling height reachable via J2
 
 
@@ -97,15 +101,25 @@ def cam_mm_to_robot_mm(cam_xyz_mm, R, t):
     return R @ cam_xyz_mm + t
 
 
-def compute_parallel_rotation(x, y):
+def compute_parallel_rotation(x, y, mode="spine", spine_orientation="vertical"):
     """
-    Computes gripper rotation R parallel to the book spine.
-    When Dobot points at the shelf target (x, y) with base azimuth
-    J1 = arctan2(y, x), keeping wrist J4 = 0° aligns gripper jaws parallel to
-    the upright spine: R = J1 = arctan2(y, x), verified in DobotStudio (R=82.2° at X=35.5, Y=258.4).
+    Computes gripper rotation R based on arrangement mode:
+      - 'spine':
+          * 'vertical': Gripper aligns parallel along book spine depth/height.
+          * 'perpendicular': 90° rotated across the book spine.
+      - 'scattered':
+          * Radial approach across desk: R = J1 = arctan2(y, x).
     """
-    az = float(np.degrees(np.arctan2(y, x)))
-    return round(az, 1)
+    if mode in ("scattered", "table", "laying"):
+        j1 = float(np.degrees(np.arctan2(y, x)))
+        return round(j1, 1)
+
+    # Spine Mode
+    base_r = float(c2r.get_spine_parallel_rotation(x, y))
+    if spine_orientation == "perpendicular":
+        r_perp = base_r - 90.0
+        return round((r_perp + 180.0) % 360.0 - 180.0, 1)
+    return round(base_r, 1)
 
 
 def compute_max_height_at(x, y, fallback=149.0):
@@ -164,52 +178,27 @@ def execute_full_retrieve_and_drop(bot, rx, ry, rz, target_r_deg, drop_pose, upd
     except Exception:
         movl_mode = None
 
-    is_shelf = (rz >= 60.0)
+    target_pick_z = float(max(rz, 2.0))
 
-    if not is_shelf:
-        # Scattered Book: Target height is at book surface Z ≈ 3.0 mm (verified in DobotStudio)
-        target_pick_z = 3.0 if rz < 3.0 else float(min(rz, 35.0))
-        hover_z = target_pick_z + 47.0
-        transit_overhead_z = float(min(z_max_shelf, 130.0))
+    # 3. Transit overhead to target (rx, ry) strictly at Maximum Height ("go there")
+    notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm at maximum height...")
+    bot.move_to(rx, ry, z_max_shelf, target_r_deg, wait=True)
+    time.sleep(0.3)
 
-        notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {transit_overhead_z:.1f}) mm at maximum height...")
-        bot.move_to(rx, ry, transit_overhead_z, target_r_deg, wait=True)
-        time.sleep(0.2)
+    # 4. Strictly Vertical Descent straight down into book pick point at target_pick_z ("and go down")
+    notify(4, 8, f"Descending vertically straight down onto book at Z={target_pick_z:.1f} mm...")
+    bot.move_to(rx, ry, target_pick_z, target_r_deg, wait=True)
+    time.sleep(0.4)
 
-        print(f"      Hovering directly above book spine at Z={hover_z:.1f} mm...", flush=True)
-        bot.move_to(rx, ry, hover_z, target_r_deg, mode=movl_mode, wait=True)
-        time.sleep(0.3)
-
-        notify(4, 8, f"Descending vertically downwards onto book spine at Z={target_pick_z:.1f} mm...")
-        bot.move_to(rx, ry, target_pick_z, target_r_deg, mode=movl_mode, wait=True)
-        time.sleep(0.4)
-    else:
-        # 3. Transit overhead to target (rx, ry) strictly at Maximum Height
-        notify(3, 8, f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm at maximum height...")
-        bot.move_to(rx, ry, z_max_shelf, target_r_deg, wait=True)
-        time.sleep(0.3)
-
-        # 4. Strictly Vertical Descent straight down into book spine (NO horizontal drift)
-        notify(4, 8, f"Descending vertically straight down onto book spine at Z={rz:.1f} mm...")
-        bot.move_to(rx, ry, rz, target_r_deg, wait=True)
-        time.sleep(0.4)
-
-    # 5. Clamp pneumatic jaws firmly onto spine (full pressure dwell for tight grip)
-    notify(5, 8, "Clamping pneumatic jaws firmly onto spine (full pressure dwell)...")
+    # 5. Clamp pneumatic jaws firmly onto target (full pressure dwell for tight grip)
+    notify(5, 8, "Clamping pneumatic jaws firmly onto target (full pressure dwell)...")
     set_gripper_state(bot, "close")
     time.sleep(1.2)
 
     # 6. Strictly Vertical Extraction: Lift book straight up using J2 to Maximum Height
-    if not is_shelf:
-        notify(6, 8, f"Extracting book straight up to clearance Z={hover_z:.0f} mm...")
-        bot.move_to(rx, ry, hover_z, target_r_deg, mode=movl_mode, wait=True)
-        time.sleep(0.2)
-        bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
-        time.sleep(0.3)
-    else:
-        notify(6, 8, f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2...")
-        bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
-        time.sleep(0.3)
+    notify(6, 8, f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2...")
+    bot.move_to(rx, ry, transit_z, target_r_deg, wait=True)
+    time.sleep(0.3)
 
     # 7. Transfer to Drop Zone at Maximum Height & Drop at Maximum Height
     notify(7, 8, f"Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.0f} mm...")
@@ -246,19 +235,38 @@ def on_mouse(event, x, y, flags, param):
 def main():
     global selected_pixel, auto_parallel_mode
 
-    # 1. Load Calibration Transformation (R, t)
+    import argparse
+    parser = argparse.ArgumentParser(description="Direct 3D Camera -> Dobot Retrieval")
+    parser.add_argument(
+        "--mode",
+        default="spine",
+        choices=["spine", "scattered"],
+        help="Arrangement mode: spine (default) or scattered",
+    )
+    args, _ = parser.parse_known_args()
+    active_mode = args.mode
+    spine_orientation = "vertical"  # In spine mode: 'vertical' (default) or 'perpendicular'
+
+    # 1. Load Calibration Transformation (R, t) for active mode
     if not c2r.is_calibrated():
         R_current = np.array([[ 0.394764,  0.0, -0.908681],
                               [ 0.852790,  0.0,  0.064282],
                               [ 0.0,      -0.980158, -0.020429]], dtype=float)
-        t_current = np.array([288.209, 356.924, 116.693], dtype=float)
+        t_current = np.array([326.131, 340.413, 119.636], dtype=float)
         c2r.save(R_current, t_current)
     else:
-        R_current, t_current = c2r.load()
+        R_current, t_current = c2r.load(mode=active_mode)
         R_current = np.asarray(R_current, float)
         t_current = np.asarray(t_current, float)
 
-    print(f"\n[Calib] Loaded R:\n{np.round(R_current, 3)}")
+    def save_active_calibration(R, t):
+        if active_mode == "scattered":
+            c2r.save_scattered(R, t)
+        else:
+            c2r.save_spine(R, t)
+
+    print(f"\n[Calib] Active Mode: {active_mode.upper()}")
+    print(f"[Calib] Loaded R:\n{np.round(R_current, 3)}")
     print(f"[Calib] Loaded t: {np.round(t_current, 2)} mm")
 
     # 2. Initialize RealSense Camera
@@ -308,11 +316,12 @@ def main():
     target_cam_xyz = None
     target_rob_xyz = None
     last_depth_mm = 0.0
-    target_rotation_deg = DEFAULT_SPINE_ROTATION_DEG
+    target_rotation_deg = DEFAULT_SPINE_ROTATION_DEG if active_mode == "spine" else DEFAULT_ROTATION_BY_MODE.get("scattered", 94.2)
     auto_parallel_mode = True
     current_drop_pose = list(DEFAULT_DROP_POSE)
 
-    status_msg = f"Ready. Grasp R={target_rotation_deg:.1f}° [PARALLEL TO SPINE]. Click target, then press P to Retrieve & Drop."
+    mode_label = f"SPINE - {spine_orientation.upper()}" if active_mode == "spine" else "SCATTERED"
+    status_msg = f"Ready. Mode: {mode_label} | Grasp R={target_rotation_deg:.1f}°. Click target, then press P."
     status_color = (0, 255, 0)
     teach_pairs_cam = []
     teach_pairs_rob = []
@@ -320,18 +329,20 @@ def main():
     print("\n" + "=" * 68)
     print("     CAMERA 3D -> EQUATION -> DOBOT RETRIEVE & DROP SYSTEM")
     print("=" * 68)
-    print("  Click Target : Select book spine coordinate on camera feed")
-    print("  P            : FULL RETRIEVE & DROP SEQUENCE (Max Ht J2 -> Grip -> Extract -> Drop)")
-    print("  G            : Move to HOVER overhead (Max height using J2, jaws parallel)")
-    print("  D            : Move to DESCEND straight down into book spine")
+    print(f"  Active Mode  : [{active_mode.upper()}] (Press M to toggle Spine <-> Scattered)")
+    print("  Click Target : Select book coordinate on camera feed")
+    print("  P            : FULL RETRIEVE & DROP SEQUENCE (Autonomous grasp & deposit)")
+    print("  M            : SWITCH MODE (Spine <-> Scattered)")
+    print("  R            : TOGGLE SPINE GRASP (Vertical <-> Perpendicular)")
     print("  B            : TEST MOVE TO DROP ZONE (Previews where book will drop)")
     print("  S            : SET DROP ZONE to current physical robot position")
-    print("  R            : FLIP GRIPPER 90° (Toggle Parallel <-> Perpendicular)")
     print("  [ / ]        : TUNE GRASP ANGLE +/- 1°")
+    print("  [- / +]      : TUNE Z CALIBRATION +/- 1 mm")
     print("  SPACE        : Toggle Gripper (Open <-> Clamp)")
     print("  X            : Relax Air Pump (Off)")
     print("  H            : Return to Home Standby Pose")
     print("  T            : TEACH / ALIGN Camera Calibration with robot tip")
+    print("  C            : CALIBRATE from DobotStudio coordinates (Manual X, Y, Z)")
     print("  Q / ESC      : Quit safely")
     print("=" * 68 + "\n")
 
@@ -373,7 +384,9 @@ def main():
                     target_rob_xyz = cam_mm_to_robot_mm(target_cam_xyz, R_current, t_current)
 
                     if auto_parallel_mode:
-                        target_rotation_deg = compute_parallel_rotation(target_rob_xyz[0], target_rob_xyz[1])
+                        target_rotation_deg = compute_parallel_rotation(
+                            target_rob_xyz[0], target_rob_xyz[1], mode=active_mode, spine_orientation=spine_orientation
+                        )
 
                     r_reach = float(np.hypot(target_rob_xyz[0], target_rob_xyz[1]))
                     is_reachable = (140.0 <= r_reach <= 320.0) and (-60.0 <= target_rob_xyz[2] <= 165.0)
@@ -394,19 +407,20 @@ def main():
             cv2.rectangle(overlay, (0, H - 35), (W, H), (20, 20, 20), -1)
             display_img = cv2.addWeighted(overlay, 0.75, display_img, 0.25, 0)
 
-            keys_text = "P:Retrieve & Drop | G:Hover | D:Descend | B:DropZone | S:SetDrop | R:Flip 90° | H:Home"
+            keys_text = "P:Pick&Drop | M:Mode(Spine/Scat) | R:Spine(Vert/Perp) | [-/+]:Trim Z | [/]:Trim R | H:Home | C:Calib"
             cv2.putText(display_img, keys_text, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1)
 
             rob_state_text = f"Dobot: X={cur_pose.x:.1f} Y={cur_pose.y:.1f} Z={cur_pose.z:.1f}mm R={cur_pose.r:.1f}° | Grip: {gripper_state.upper()}"
             cv2.putText(display_img, rob_state_text, (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 255), 1)
 
-            par_r = compute_parallel_rotation(target_rob_xyz[0], target_rob_xyz[1]) if target_rob_xyz is not None else DEFAULT_SPINE_ROTATION_DEG
-            is_parallel = abs(target_rotation_deg - par_r) < 10.0
-            is_perpendicular = abs(abs(target_rotation_deg - par_r) - 90.0) < 10.0
-            rot_mode = "PARALLEL TO SPINE" if is_parallel else ("PERPENDICULAR" if is_perpendicular else "CUSTOM")
-            rot_color = (0, 255, 0) if is_parallel else (0, 200, 255)
+            if active_mode == "spine":
+                mode_label = f"SPINE - {spine_orientation.upper()}"
+                rot_color = (0, 255, 0) if spine_orientation == "vertical" else (0, 200, 255)
+            else:
+                mode_label = "SCATTERED"
+                rot_color = (0, 255, 200)
 
-            rot_text = f"Grasp R: {target_rotation_deg:+.1f}° [{rot_mode}] | Drop Zone: [{current_drop_pose[0]:.0f}, {current_drop_pose[1]:.0f}, {current_drop_pose[2]:.0f}] mm"
+            rot_text = f"Mode: [{mode_label}] | Grasp R: {target_rotation_deg:+.1f}° | Drop: [{current_drop_pose[0]:.0f}, {current_drop_pose[1]:.0f}, {current_drop_pose[2]:.0f}] mm"
             cv2.putText(display_img, rot_text, (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.39, rot_color, 1)
 
             if selected_pixel and target_rob_xyz is not None:
@@ -438,6 +452,26 @@ def main():
                 bot.clear_alarms()
                 bot.move_to(HOME_POSE[0], HOME_POSE[1], HOME_POSE[2], HOME_POSE[3], wait=True)
                 status_msg = "At Home Standby Pose."
+                continue
+
+            # M: Toggle Mode between Spine and Scattered
+            if key in (ord("m"), ord("M")):
+                active_mode = "scattered" if active_mode == "spine" else "spine"
+                auto_parallel_mode = True
+                R_current, t_current = c2r.load(mode=active_mode)
+                R_current = np.asarray(R_current, float)
+                t_current = np.asarray(t_current, float)
+                if target_cam_xyz is not None:
+                    target_rob_xyz = cam_mm_to_robot_mm(target_cam_xyz, R_current, t_current)
+                    target_rotation_deg = compute_parallel_rotation(
+                        target_rob_xyz[0], target_rob_xyz[1], mode=active_mode, spine_orientation=spine_orientation
+                    )
+                else:
+                    target_rotation_deg = DEFAULT_SPINE_ROTATION_DEG if active_mode == "spine" else DEFAULT_ROTATION_BY_MODE.get("scattered", 94.2)
+                mode_label = f"SPINE - {spine_orientation.upper()}" if active_mode == "spine" else "SCATTERED"
+                print(f"\n[Mode] Switched to {active_mode.upper()} mode! Loaded {active_mode} calibration (t={np.round(t_current, 1)} mm).")
+                status_msg = f"Mode: {mode_label} | Grasp R: {target_rotation_deg:.1f}°"
+                status_color = (0, 255, 255)
                 continue
 
             # P: Full Retrieve & Drop Sequence
@@ -475,69 +509,24 @@ def main():
                 status_msg = f"Drop Zone updated to ({current_drop_pose[0]:.0f}, {current_drop_pose[1]:.0f}, {current_drop_pose[2]:.0f}) mm"
                 continue
 
-            # G: Hover overhead of target at maximum height
-            if key in (ord("g"), ord("G")):
-                if target_rob_xyz is None:
-                    status_msg = "Please click a target on the camera feed first!"
-                    status_color = (0, 0, 255)
-                    continue
-
-                rx, ry, rz = target_rob_xyz
-                z_max_shelf = compute_max_height_at(rx, ry, fallback=TRANSIT_MAX_HEIGHT_Z)
-
-                print(f"\n[Dobot] Hovering overhead at maximum height: Target=({rx:.1f}, {ry:.1f}), Z={z_max_shelf:.1f}, R={target_rotation_deg:.1f}°...")
-                status_msg = f"Hovering at ({rx:.0f}, {ry:.0f}, {z_max_shelf:.0f}) mm, R={target_rotation_deg:.1f}°..."
-                bot.clear_alarms()
-                cur_p = bot.get_pose().position
-                # 1. Elevate to maximum height first
-                if cur_p.z < TRANSIT_MAX_HEIGHT_Z:
-                    bot.move_to(cur_p.x, cur_p.y, TRANSIT_MAX_HEIGHT_Z, cur_p.r, wait=True)
-                # 2. Rotate gripper at maximum height
-                bot.move_to(cur_p.x, cur_p.y, TRANSIT_MAX_HEIGHT_Z, target_rotation_deg, wait=True)
-                # 3. Move overhead to target
-                bot.move_to(rx, ry, z_max_shelf, target_rotation_deg, wait=True)
-                status_msg = f"Overhead at ({rx:.0f}, {ry:.0f}, {z_max_shelf:.0f}) mm. Press D to Descend, P to Pick & Drop."
-                status_color = (0, 255, 0)
-                continue
-
-            # D: Descend strictly vertically to target
-            if key in (ord("d"), ord("D")):
-                if target_rob_xyz is None:
-                    status_msg = "Please click a target on the camera feed first!"
-                    status_color = (0, 0, 255)
-                    continue
-
-                rx, ry, rz = target_rob_xyz
-                z_max_shelf = compute_max_height_at(rx, ry, fallback=TRANSIT_MAX_HEIGHT_Z)
-
-                print(f"\n[Dobot] Descending to target: ({rx:.1f}, {ry:.1f}, {rz:.1f}) mm, R={target_rotation_deg:.1f}°...")
-                status_msg = f"Descending to target ({rx:.0f}, {ry:.0f}, {rz:.0f}) mm..."
-                bot.clear_alarms()
-                cur_p = bot.get_pose().position
-
-                # If not already directly overhead, position overhead at maximum height first
-                if np.hypot(cur_p.x - rx, cur_p.y - ry) > 8.0:
-                    if cur_p.z < TRANSIT_MAX_HEIGHT_Z:
-                        bot.move_to(cur_p.x, cur_p.y, TRANSIT_MAX_HEIGHT_Z, cur_p.r, wait=True)
-                    bot.move_to(cur_p.x, cur_p.y, TRANSIT_MAX_HEIGHT_Z, target_rotation_deg, wait=True)
-                    bot.move_to(rx, ry, z_max_shelf, target_rotation_deg, wait=True)
-
-                # Strictly vertical descent
-                bot.move_to(rx, ry, rz, target_rotation_deg, wait=True)
-                status_msg = f"Reached spine ({rx:.0f}, {ry:.0f}, {rz:.0f}) mm, R={target_rotation_deg:.1f}°. Press SPACE to clamp."
-                status_color = (0, 255, 0)
-                continue
-
-            # R: Toggle 90 deg rotation (Parallel <-> Perpendicular)
+            # R: In Spine mode, toggle Vertical <-> Perpendicular; in Scattered, toggle 90°
             if key in (ord("r"), ord("R")):
                 auto_parallel_mode = False
-                base_r = compute_parallel_rotation(target_rob_xyz[0], target_rob_xyz[1]) if target_rob_xyz is not None else DEFAULT_SPINE_ROTATION_DEG
-                if abs(target_rotation_deg - base_r) < 10.0:
-                    target_rotation_deg = round(base_r - 90.0, 1)
+                if active_mode == "spine":
+                    spine_orientation = "perpendicular" if spine_orientation == "vertical" else "vertical"
+                    if target_rob_xyz is not None:
+                        target_rotation_deg = compute_parallel_rotation(
+                            target_rob_xyz[0], target_rob_xyz[1], mode="spine", spine_orientation=spine_orientation
+                        )
+                    else:
+                        base_r = DEFAULT_SPINE_ROTATION_DEG
+                        target_rotation_deg = base_r if spine_orientation == "vertical" else round((base_r - 90.0 + 180.0) % 360.0 - 180.0, 1)
+                    print(f"[Spine Grasp] Orientation switched to: {spine_orientation.upper()} (R={target_rotation_deg:.1f}°)")
+                    status_msg = f"Spine Grasp: {spine_orientation.upper()} ({target_rotation_deg:.1f}°)"
                 else:
-                    target_rotation_deg = base_r
-                print(f"[Rotation] Grasp R toggled to: {target_rotation_deg:.1f}°")
-                status_msg = f"Grasp R toggled to {target_rotation_deg:.1f}° ({'PARALLEL TO SPINE' if abs(target_rotation_deg - base_r) < 10.0 else 'PERPENDICULAR'})"
+                    target_rotation_deg = round((target_rotation_deg - 90.0 + 180.0) % 360.0 - 180.0, 1)
+                    print(f"[Scattered Grasp] Rotation toggled: R={target_rotation_deg:.1f}°")
+                    status_msg = f"Scattered Grasp R: {target_rotation_deg:.1f}°"
                 continue
 
             # [ and ]: Tune rotation by +/- 1 degree
@@ -553,6 +542,21 @@ def main():
                 target_rotation_deg = round(target_rotation_deg + 1.0, 1)
                 print(f"[Rotation] Grasp R: {target_rotation_deg:.1f}°")
                 status_msg = f"Grasp R trimmed: {target_rotation_deg:.1f}°"
+                continue
+
+            # - and + (=): Tune Z calibration height live by +/- 1 mm
+            if key in (ord("-"), ord("_")):
+                t_current[2] -= 1.0
+                save_active_calibration(R_current, t_current)
+                print(f"[Z-Trim] [{active_mode.upper()}] Calibration Z lowered by 1 mm -> t[Z]={t_current[2]:.2f} mm")
+                status_msg = f"[{active_mode.upper()}] Z trimmed -1mm: t[Z]={t_current[2]:.1f}mm"
+                continue
+
+            if key in (ord("="), ord("+")):
+                t_current[2] += 1.0
+                save_active_calibration(R_current, t_current)
+                print(f"[Z-Trim] [{active_mode.upper()}] Calibration Z raised by 1 mm -> t[Z]={t_current[2]:.2f} mm")
+                status_msg = f"[{active_mode.upper()}] Z trimmed +1mm: t[Z]={t_current[2]:.1f}mm"
                 continue
 
             # Spacebar: Toggle Gripper
@@ -588,7 +592,7 @@ def main():
 
                 if len(teach_pairs_cam) < 3:
                     t_current = real_rob_pt - (R_current @ target_cam_xyz)
-                    c2r.save(R_current, t_current)
+                    save_active_calibration(R_current, t_current)
                     print(f"[Teach] Point {len(teach_pairs_cam)} aligned! Translation updated to t={np.round(t_current, 2)} mm")
                     status_msg = f"Point {len(teach_pairs_cam)} aligned! t updated to [{t_current[0]:.0f}, {t_current[1]:.0f}, {t_current[2]:.0f}]"
                 else:
@@ -596,11 +600,43 @@ def main():
                     errs = c2r.residuals(R_opt, t_opt, teach_pairs_cam, teach_pairs_rob)
                     rmse = float(np.sqrt(np.mean(errs ** 2)))
                     R_current, t_current = R_opt, t_opt
-                    c2r.save(R_current, t_current)
+                    save_active_calibration(R_current, t_current)
                     print(f"[Teach] Full SVD fit updated on {len(teach_pairs_cam)} points! RMSE = {rmse:.2f} mm")
                     status_msg = f"SVD Fit Updated ({len(teach_pairs_cam)} pts)! RMSE = {rmse:.1f} mm"
 
                 status_color = (0, 255, 0)
+                continue
+
+            # C: Calibrate translation from manual DobotStudio coordinates
+            if key in (ord("c"), ord("C")):
+                if target_cam_xyz is None:
+                    status_msg = "Click the target point on camera first, then press C to calibrate!"
+                    status_color = (0, 0, 255)
+                    continue
+
+                print("\n" + "=" * 65)
+                print(f"[Calibrate] Selected Camera 3D: [{target_cam_xyz[0]:.1f}, {target_cam_xyz[1]:.1f}, {target_cam_xyz[2]:.1f}] mm")
+                print("Enter Dobot coordinates from DobotStudio Operation Panel:")
+                print("Format: X Y Z   (e.g., '18.9 283.2 126.3' or leave blank to cancel)")
+                print("=" * 65)
+                try:
+                    coords_input = input("Dobot [X Y Z]: ").strip()
+                    if coords_input:
+                        parts = [float(val) for val in coords_input.replace(",", " ").split() if val.strip()]
+                        if len(parts) >= 3:
+                            p_rob_manual = np.array(parts[:3], dtype=float)
+                            t_current = p_rob_manual - (R_current @ target_cam_xyz)
+                            save_active_calibration(R_current, t_current)
+                            print(f"[Calibrate] SUCCESS! Translation updated for [{active_mode.upper()}] to t = {np.round(t_current, 2)} mm")
+                            print(f"[Calibrate] Recalibrated robot target: {np.round(R_current @ target_cam_xyz + t_current, 2)} mm")
+                            status_msg = f"Calibrated [{active_mode.upper()}]! Robot Target: X={p_rob_manual[0]:.1f}, Y={p_rob_manual[1]:.1f}, Z={p_rob_manual[2]:.1f}"
+                            status_color = (0, 255, 0)
+                        else:
+                            print("[Calibrate] Invalid input. Expected 3 numbers: X Y Z")
+                    else:
+                        print("[Calibrate] Cancelled.")
+                except Exception as ex:
+                    print(f"[Calibrate Error]: {ex}")
                 continue
 
     finally:

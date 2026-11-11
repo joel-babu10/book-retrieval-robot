@@ -1,124 +1,581 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Book Retrieval Console</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
-<style>
-*{box-sizing:border-box}
-body{margin:0;background:#0E1318;color:#E6EAEE;font-family:'IBM Plex Sans',sans-serif}
-.mono{font-family:'IBM Plex Mono',monospace}
-.wrap{max-width:1360px;margin:0 auto;padding:24px;display:flex;flex-direction:column;gap:20px}
-.grid{display:grid;grid-template-columns:minmax(0,860px) minmax(320px,1fr);gap:20px}
-.col{display:flex;flex-direction:column;gap:16px}
-.card{background:#161D25;border:1px solid #2A3540;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
-.card.hit{border-color:#F2B84B}
-.lbl{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8C98A4}
-.pill{padding:7px 12px;border:1px solid #2A3540;border-radius:6px;font-size:12px}
-button{font-family:inherit;cursor:pointer}
-button:disabled{cursor:not-allowed}
-.btn{height:44px;border-radius:6px;border:1px solid #2A3540;background:#0E1318;color:#E6EAEE;font-size:13px}
-.primary{background:#F2B84B;color:#14100A;border:0;font-weight:600;font-size:14px;height:46px}
-.primary:disabled{opacity:.5}
-.modes{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #2A3540;border-radius:6px;overflow:hidden}
-.modes button{height:44px;border:0;background:#0E1318;color:#B7C0C9;font-size:12px}
-.modes button.on{background:#F2B84B;color:#14100A;font-weight:600}
-.cam{position:relative;aspect-ratio:860/484;border-radius:10px;overflow:hidden;border:1px solid #2A3540;background:#161D25}
-.cam img{width:100%;height:100%;object-fit:contain;display:block}
-.chip{position:absolute;left:14px;top:14px;background:rgba(14,19,24,.85);padding:5px 9px;border-radius:4px;color:#B7C0C9;font-size:11px}
-.steps{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
-.step{border-top:3px dashed #4A5663;padding-top:8px}
-.step.done{border-top:3px solid #3DD6B0}
-.step .s{font-size:11px;color:#8C98A4}.step.done .s{color:#3DD6B0}
-.step .n{font-size:13px;font-weight:500;margin-top:2px}
-.step .d{font-size:11px;color:#8C98A4;margin-top:2px}
-.xyz{background:#0E1318;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.6;white-space:pre}
-.xyz small{display:block;font:11px 'IBM Plex Sans';color:#8C98A4;margin-bottom:6px}
-input[type=text]{flex:1;background:#0E1318;border:1px solid #2A3540;border-radius:6px;color:#E6EAEE;font:14px 'IBM Plex Sans';padding:0 12px;height:44px}
-#log{font-size:11.5px;line-height:1.7;color:#B7C0C9;overflow:auto;max-height:180px}
-@media(max-width:1100px){.grid{grid-template-columns:1fr}}
-</style></head><body><div class="wrap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head><body><canvas id="bg" aria-hidden="true"></canvas>
+<div class="topbar" id="topbar"><i id="topProg"></i></div>
+<div class="wrap">
 
-<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
- <div><div style="font-size:22px;font-weight:600">Book Retrieval Console</div>
- <div style="font-size:13px;color:#8C98A4">Find a book, locate it in 3D, hand the target to the arm</div></div>
- <div class="mono" style="display:flex;gap:10px"><div class="pill" id="pMode" style="color:#F2B84B">Mode: auto</div></div>
-</div>
+<header class="top">
+ <div class="brand">
+  <div class="mark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4z"/><path d="M9 8h6"/></svg></div>
+  <div><h1>Book Retrieval Console</h1><p>Locate a book, resolve it in 3D, hand it to the arm</p></div>
+ </div>
+ <div class="meta mono">
+  <span id="pFeed" class="off"><i class="dot"></i><span id="pFeedTxt">Camera connecting</span></span>
+  <span id="pMode">Mode: auto</span>
+  <span id="pClock">--:--:--</span>
+ </div>
+</header>
 
 <div class="grid">
  <div class="col">
-  <div class="cam"><img id="feed" src="/video_feed" alt="Live camera view"><div class="chip mono">Live / annotated</div></div>
-  <div class="card"><div class="lbl">Pipeline</div>
-   <div class="steps" id="steps"></div></div>
+  <div class="cam" id="camBox">
+   <img id="feed" src="/video_feed" alt="Live camera view">
+   <div class="hud"><i></i><i></i><i></i><i></i></div>
+   <canvas id="ov"></canvas>
+   <div class="cam-shimmer"></div>
+   <div class="scan-pill mono" id="scanPill">
+    <span class="scan-sparkle"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.6 9.4L24 12L14.6 14.6L12 24L9.4 14.6L0 12L9.4 9.4L12 0Z"/></svg></span>
+    <span class="scan-text" id="scanText">Locating book</span>
+    <span class="scan-dots"><i></i><i></i><i></i></span>
+   </div>
+   <div class="pillx chip"><i class="dot" style="margin-right:7px"></i><span id="chipTxt">Live / annotated</span></div>
+   <button class="pillx live-btn mono" id="btnLiveCam" title="Reset camera to live feed">
+    <i class="dot" style="background:#34D399;margin-right:6px"></i>Reset to Live
+   </button>
+   <button class="reconnect mono" id="reconnect">Reconnect</button>
+   <div class="pillx banner" id="camBanner">Ready</div>
+  </div>
+
+  <div class="sec"><div class="lbl"><b>00</b>Pipeline</div><div class="steps" id="steps"></div></div>
+
+  <div class="sec">
+   <div class="row log-head"><div class="lbl"><b>03</b>Log</div><button class="btn" id="clearLog">Clear</button></div>
+   <div id="log" class="mono"></div>
+  </div>
  </div>
 
  <div class="col">
-  <div class="card">
-   <label class="lbl" for="q">Request a book</label>
-   <div style="display:flex;gap:8px">
-    <input id="q" type="text" placeholder="Title or author">
-    <button class="btn" id="mic" style="width:44px" aria-label="Speak query">
-     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+  <div class="sec panel">
+   <label class="lbl" for="q"><b>01</b>Request a book</label>
+   <div class="qrow">
+    <input id="q" type="text" placeholder="Title or author" autocomplete="off">
+    <button class="mic" id="mic" aria-label="Speak query">
+     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
    </div>
-   <div class="modes" id="modes">
+   <div class="seg" id="modes"><i class="bar" id="bar"></i>
     <button data-m="auto" class="on">Auto</button><button data-m="spine">Spine</button>
     <button data-m="scattered">Scattered</button><button data-m="mixed">Mixed</button></div>
+   <div class="auto-row">
+    <label class="auto-toggle" title="Automatically dispatch Dobot arm when target is localized">
+     <input type="checkbox" id="autoPick">
+     <span class="toggle-track"><i class="toggle-knob"></i></span>
+     <span class="toggle-txt">Full Autonomous Pick</span>
+    </label>
+    <span class="auto-badge" id="autoBadge">Manual Dispatch</span>
+   </div>
    <button class="primary" id="go">Find book</button>
+   <div class="recent" id="recent"></div>
+   <div class="hint">Press <kbd>/</kbd> to search, <kbd>Enter</kbd> to run.</div>
   </div>
 
-  <div class="card hit" id="res" style="display:none">
-   <div style="display:flex;justify-content:space-between;align-items:baseline">
-    <div class="lbl" style="color:#F2B84B">Target located</div><div class="mono" id="score" style="font-size:12px;color:#B7C0C9"></div></div>
-   <div id="title" style="font-size:18px;font-weight:600"></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-    <div class="xyz mono"><small>Camera frame (m)</small><span id="cam"></span></div>
-    <div class="xyz mono" style="border:1px dashed #4A5663"><small>Robot frame</small><span id="rob"></span></div></div>
-   <div id="note" style="font-size:12px;color:#B7C0C9"></div>
-   <div style="display:flex;gap:8px">
-    <button class="btn" id="send" style="flex:1" disabled>Send to arm</button>
-    <button class="btn" id="rescan" style="width:96px">Re-scan</button></div>
+  <div class="sec panel" id="resPanel">
+   <div class="row"><div class="lbl"><b>02</b>Target</div><div class="badge" id="badge">Standby</div></div>
+   <div class="title empty" id="title">No target yet.</div>
+   <div class="meters">
+    <div class="meter"><div class="top2"><span>Confidence</span><b id="confV">--</b></div><div class="track"><div class="fill" id="confF"></div></div></div>
+    <div class="meter"><div class="top2"><span>Similarity</span><b id="simV">--</b></div><div class="track"><div class="fill" id="simF"></div></div></div>
+   </div>
+   <div class="view3d" id="v3">
+    <canvas id="cv" aria-label="3D position of the target"></canvas>
+    <div class="vtools"><button id="vCam" class="on">Camera</button><button id="vRob" disabled>Robot</button></div>
+    <div class="vnote">Drag to rotate. Double-click to reset.</div>
+   </div>
+   <div class="xyzs">
+    <button class="xyz" id="boxCam" title="Copy camera coordinates"><small>CAMERA · m<span>Copy</span></small>
+     <div class="ax"><span>X</span><b id="cX">--</b></div><div class="ax"><span>Y</span><b id="cY">--</b></div><div class="ax"><span>Z</span><b id="cZ">--</b></div></button>
+    <button class="xyz off" id="boxRob" title="Copy robot coordinates"><small>ROBOT · mm<span>Copy</span></small>
+     <div class="ax"><span>X</span><b id="rX">--</b></div><div class="ax"><span>Y</span><b id="rY">--</b></div><div class="ax"><span>Z</span><b id="rZ">--</b></div></button>
+   </div>
+   <div class="note" id="note"></div>
+   <div class="actions">
+    <button class="btn send" id="send" disabled><span id="sendTxt">Send to arm</span><i class="prog"></i></button>
+    <button class="btn narrow" id="rescan">Re-scan</button>
+   </div>
   </div>
-
-  <div class="card" style="flex:1"><div class="lbl">Log</div><div id="log" class="mono"></div></div>
  </div>
 </div></div>
+<div class="toast" id="toast" role="status"></div>
 
 <script>
 const $=id=>document.getElementById(id);
-const STEPS=[["Query","text / voice"],["Mode gate",""],["OBB + SAM",""],["OCR match",""],["Depth to XYZ",""],["Robot frame","transform"]];
-let mode="auto";
-function renderSteps(n,d={}){
-  $("steps").innerHTML=STEPS.map((s,i)=>`<div class="step ${i<n?"done":""}"><div class="s mono">${i+1} ${i<n?"done":"pending"}</div><div class="n">${s[0]}</div><div class="d">${d[i]||s[1]}</div></div>`).join("");
+const REDUCED=matchMedia("(prefers-reduced-motion: reduce)").matches;
+const STEPS=[["Query","text / voice"],["Mode gate","arrangements"],["OBB + SAM","pose lock"],["OCR match","text reading"],["Depth to XYZ","point cloud"],["Robot frame","base coordinates"]];
+let mode="auto",busy=false,view="cam",pts={cam:null,rob:null},history=[];
+/* toast + log */
+let tt;function toast(m){const t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(tt);tt=setTimeout(()=>t.classList.remove("show"),1800)}
+function log(t,c){const l=$("log"),e=document.createElement("div");
+  if(/^─+$/.test(t)){e.className="rule";l.appendChild(e);return}
+  const ts=document.createElement("span");ts.className="t";ts.textContent=new Date().toTimeString().slice(0,8);e.appendChild(ts);
+  const m=t.match(/^(\[[^\]]+\])\s*(.*)$/);
+  if(m){const g=document.createElement("span");g.className="tag";g.textContent=m[1];e.appendChild(g);e.appendChild(document.createTextNode(m[2]))}else e.appendChild(document.createTextNode(t));
+  if(c)e.className=c;l.appendChild(e);l.scrollTop=l.scrollHeight}
+$("clearLog").onclick=()=>{$("log").innerHTML=""};
+/* clock */
+const tick=()=>{$("pClock").textContent=new Date().toTimeString().slice(0,8)};tick();setInterval(tick,1000);
+/* camera feed */
+const cam=$("camBox"),feed=$("feed");
+function feedState(on){
+  cam.classList.toggle("offline",!on);
+  $("pFeed").className=on?"live":"off";
+  $("pFeedTxt").textContent=on?"Camera live":"Camera offline";
+  $("chipTxt").textContent=on?"Live / annotated":"No signal";
 }
-renderSteps(0);
-function log(t,c){const l=$("log"),e=document.createElement("div");e.textContent=new Date().toTimeString().slice(0,8)+" "+t;if(c)e.style.color=c;l.appendChild(e);l.scrollTop=l.scrollHeight}
-const fmt=a=>a?`X ${a[0].toFixed(3)}\nY ${a[1].toFixed(3)}\nZ ${a[2].toFixed(3)}`:"X --\nY --\nZ --";
-$("modes").onclick=e=>{const b=e.target.closest("button");if(!b)return;mode=b.dataset.m;
-  [...$("modes").children].forEach(x=>x.classList.toggle("on",x===b));$("pMode").textContent="Mode: "+mode};
-async function find(){
-  const query=$("q").value.trim();if(!query){$("q").focus();return}
-  $("go").disabled=true;$("go").textContent="Searching...";log(`query: "${query}"`);log("gate: "+mode);
-  try{
-    const r=await fetch("/api/find",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,mode})});
-    const d=await r.json();
-    if(!d.found){log("no match","#F2B84B");$("res").style.display="none";renderSteps(4)}
-    else{
-      $("res").style.display="flex";$("title").textContent=d.title;
-      $("score").textContent=`conf ${d.conf.toFixed(2)} / sim ${d.sim.toFixed(2)}`;
-      $("cam").textContent=fmt(d.cam_xyz);$("rob").textContent=fmt(d.robot_xyz);
-      $("rob").style.color=d.robot_xyz?"#E6EAEE":"#8C98A4";
-      $("note").textContent=d.pick_note?"Pick point: "+d.pick_note:"";
-      $("send").disabled=!d.robot_xyz;$("send").textContent=d.robot_xyz?"Send to arm":"Send to arm (needs Step 6)";
-      renderSteps(d.robot_xyz?6:5,{1:d.mode});
-      log("xyz: "+d.cam_xyz.map(v=>v.toFixed(3)).join(", "),"#3DD6B0");
+async function checkFeedHealth(){
+  if (feed.naturalWidth > 0) {
+    feedState(true);
+    return;
+  }
+  try {
+    const r = await fetch("/api/status");
+    const d = await r.json();
+    if (d.camera_live) {
+      feedState(true);
     }
-  }catch(e){log("error: "+e.message,"#F2B84B")}
-  $("go").disabled=false;$("go").textContent="Find book";
+  } catch(e) {}
 }
-$("go").onclick=find;$("rescan").onclick=find;$("q").onkeydown=e=>{if(e.key==="Enter")find()};
-$("send").onclick=async()=>{
+feed.onload=()=>feedState(true);
+feed.onerror=()=>{feedState(false);log("[CAMERA] Optical feed lost","err")};
+$("reconnect").onclick=()=>{
+  feed.src="/video_feed?t="+Date.now();
+  $("pFeedTxt").textContent="Camera connecting";
+  log("[CAMERA] Reconnecting feed","warn");
+  setTimeout(checkFeedHealth, 400);
+};
+new ResizeObserver(()=>cam.style.setProperty("--camh",cam.clientHeight+"px")).observe(cam);
+setInterval(checkFeedHealth, 400);
+setTimeout(checkFeedHealth, 200);
+
+/* pipeline */
+function setSteps(done,active=-1,d={},fail=-1){
+  const tb=$("topbar");
+  tb.className="topbar"+(fail>=0?" fail":done>=5?" done":"");
+  $("topProg").style.width=(fail>=0?(fail+.5)/6:(done+(active>=0?.5:0))/6)*100+"%";
+  $("steps").innerHTML=STEPS.map((s,i)=>{
+    const st=i<done?"done":i===fail?"fail":i===active?"active":"";
+    const lab=st==="done"?"done":st==="fail"?"failed":st==="active"?"running":"pending";
+    return `<div class="step ${st}"><div class="s mono">${i+1} ${lab}</div><div class="n">${s[0]}</div><div class="d">${d[i]||s[1]}</div></div>`;
+  }).join("");
+}
+setSteps(0);
+
+/* mode selector */
+function setMode(m){
+  mode=m;let on;
+  [...$("modes").querySelectorAll("button")].forEach(x=>{
+    const a=x.dataset.m===m;
+    x.classList.toggle("on",a);
+    if(a)on=x;
+  });
+  $("bar").style.left=on.offsetLeft+"px";
+  $("bar").style.width=on.offsetWidth+"px";
+  $("pMode").textContent="Mode: "+m;
+}
+$("modes").onclick=e=>{const b=e.target.closest("button");if(b)setMode(b.dataset.m)};
+document.fonts.ready.then(()=>setMode(mode));
+addEventListener("resize",()=>setMode(mode));
+setMode("auto");
+
+/* numbers */
+function tween(el,to,dec=3,ms=350){
+  if(to==null){el.textContent="--";el.dataset.v="";return}
+  const f=parseFloat(el.dataset.v),a=isNaN(f)?0:f,t0=performance.now();
+  if(REDUCED){el.textContent=to.toFixed(dec);el.dataset.v=to;return}
+  (function s(now){const p=Math.min(1,(now-t0)/ms),e=1-Math.pow(1-p,3),v=a+(to-a)*e;el.textContent=v.toFixed(dec);el.dataset.v=v;if(p<1)requestAnimationFrame(s)})(t0);
+}
+function setXYZ(p,arr){["X","Y","Z"].forEach((a,i)=>tween($(p+a),arr?arr[i]:null,p==="r"?1:3))}
+function meter(v,f,x){$(v).textContent=x==null?"--":x.toFixed(2);$(f).style.width=x==null?"0%":Math.max(0,Math.min(1,x))*100+"%"}
+const copy=(arr,n,dec=3)=>{if(!arr)return;navigator.clipboard?.writeText(arr.map(v=>v.toFixed(dec)).join(", "));toast("Copied "+n+" coordinates")};
+$("boxCam").onclick=()=>copy(pts.cam,"camera");$("boxRob").onclick=()=>copy(pts.rob,"robot",1);
+
+/* history */
+function pushHistory(q){
+  history=[q,...history.filter(x=>x!==q)].slice(0,6);
+  const r=$("recent");r.innerHTML="";
+  history.forEach(h=>{
+    const b=document.createElement("button");
+    b.className="rchip";
+    b.textContent=h;
+    b.onclick=()=>{$("q").value=h;find()};
+    r.appendChild(b);
+  });
+}
+
+/* loading phases: synchronized with inference pipeline */
+const PHN = [
+  "Reading query",
+  "Choosing gate",
+  "Segmenting scene",
+  "Reading spines",
+  "Measuring depth",
+  "Mapping to robot"
+];
+const DUR = [500, 650, 950, 1150, 450, 350];
+let ph = -1, phT = 0, PT = [];
+
+function setPhase(i, detail=""){
+  ph = i;
+  phT = performance.now();
+  setSteps(i, i, detail ? {[i]: detail} : {});
+  if ($("scanText")) $("scanText").textContent = PHN[i] || "Scanning…";
+  if (typeof ripple === "function") ripple();
+}
+
+function phStart(){
+  phStop();
+  let t = 0;
+  [0, 1, 2, 3].forEach(i => {
+    PT.push(setTimeout(() => setPhase(i), t));
+    t += DUR[i];
+  });
+}
+
+function phStop(){
+  PT.forEach(clearTimeout);
+  PT = [];
+}
+
+async function phFinish(found){
+  phStop();
+  if (ph < 0) setPhase(0);
+  const end = found ? 5 : 3;
+  for (let i = Math.max(ph, 3); i <= end; i++) {
+    if (i !== ph) setPhase(i);
+    await new Promise(r => setTimeout(r, found ? 80 : 120));
+  }
+}
+
+/* find */
+let ping = 0;
+let autoTimer = null;
+function setBadge(t, c){ const b = $("badge"); b.textContent = t; b.className = "badge " + (c || ""); }
+
+// Initialize autoPick toggle
+const autoPickEl = $("autoPick");
+const autoBadgeEl = $("autoBadge");
+if (autoPickEl && autoBadgeEl) {
+  const savedAuto = localStorage.getItem("autoPick");
+  if (savedAuto === "1") {
+    autoPickEl.checked = true;
+    autoBadgeEl.textContent = "Autonomous ON";
+    autoBadgeEl.classList.add("on");
+  }
+  autoPickEl.addEventListener("change", () => {
+    const isAuto = autoPickEl.checked;
+    localStorage.setItem("autoPick", isAuto ? "1" : "0");
+    autoBadgeEl.textContent = isAuto ? "Autonomous ON" : "Manual Dispatch";
+    autoBadgeEl.classList.toggle("on", isAuto);
+    log(isAuto ? "[AUTONOMOUS] Full autonomous pick enabled -> will auto-dispatch arm on target lock" : "[AUTONOMOUS] Autonomous pick disabled -> manual dispatch required", isAuto ? "warn" : "info");
+    toast(isAuto ? "Full Autonomous Pick enabled" : "Manual dispatch mode");
+  });
+}
+
+async function find(){
+  if (busy) return;
+  const query = $("q").value.trim();
+  if (!query){ $("q").focus(); return; }
+  busy = true;
+  $("go").disabled = true;
+  $("go").classList.add("busy");
+  $("go").textContent = "Searching…";
+  cam.classList.remove("locked");
+  cam.classList.add("scanning");
+  if ($("scanText")) $("scanText").textContent = `Locating "${query}"`;
+  $("camBanner").textContent = `Scanning: ${query}`;
+  clearTimeout(autoTimer);
+  $("send").classList.remove("auto-counting");
+  log("────────────────────────────────────────");
+  log(`[TARGET SEARCH] Query: "${query}" | Mode: ${mode.toUpperCase()} (GPU accelerated)`, "info");
+
+  phStart();
+  const tStart = performance.now();
+
+  try {
+    const r = await fetch("/api/find", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, mode })
+    });
+    const d = await r.json();
+    await phFinish(d.found);
+    ph = -1;
+    pushHistory(query);
+    const elapsed = Math.round(performance.now() - tStart);
+
+    if (!d.found) {
+      log(`[DETECTION] No book matching "${query}" located (${elapsed}ms)`, "err");
+      setBadge("Not found", "miss");
+      $("resPanel").classList.remove("hit");
+      $("title").className = "title empty";
+      $("title").textContent = "No match for that request.";
+      $("note").textContent = "Try the title or author as printed on the book cover/spine, or switch mode.";
+      pts = { cam: null, rob: null };
+      setXYZ("c", null);
+      setXYZ("r", null);
+      meter("confV", "confF", null);
+      meter("simV", "simF", null);
+      $("boxRob").classList.add("off");
+      $("send").disabled = true;
+      $("vRob").disabled = true;
+      setView("cam");
+      setSteps(2, -1, { 2: "No match" }, 3);
+      $("camBanner").textContent = "No match";
+      toast(`No match found for "${query}"`);
+    } else {
+      pts = { cam: d.cam_xyz, rob: d.robot_xyz || null };
+      setBadge("Located", "hit");
+      $("resPanel").classList.add("hit");
+      $("title").className = "title";
+      $("title").textContent = d.title;
+      meter("confV", "confF", d.conf);
+      meter("simV", "simF", d.sim);
+      setXYZ("c", d.cam_xyz);
+      setXYZ("r", d.robot_xyz || null);
+      $("boxRob").classList.toggle("off", !d.robot_xyz);
+      $("note").textContent = d.pick_note ? "Pick point: " + d.pick_note : "";
+      $("vRob").disabled = !d.robot_xyz;
+      setSteps(d.robot_xyz ? 6 : 5, -1, {
+        0: d.title,
+        1: d.mode,
+        2: "OBB+SAM lock",
+        3: `sim: ${d.sim}`,
+        4: "XYZ resolved",
+        5: d.robot_xyz ? "Base transform" : "Unreachable"
+      });
+      cam.classList.remove("scanning");
+      cam.classList.add("locked");
+      $("camBanner").textContent = "Locked: " + d.title;
+      setTimeout(() => cam.classList.remove("locked"), 3000);
+      ping = performance.now();
+
+      // Output step-by-step telemetry to log
+      if (d.log_details && Array.isArray(d.log_details)) {
+        d.log_details.forEach(step => {
+          let cls = "ok";
+          if (step.includes("[CLASSIFIER]") || step.includes("[DETECTION]")) cls = "info";
+          else if (step.includes("[ROBOT FRAME]") || step.includes("[KINEMATICS]")) cls = "warn";
+          else if (step.includes("[PIPELINE]") || step.includes("[GPU STATUS]")) cls = "ok";
+          log(step, cls);
+        });
+      } else {
+        log(`[TARGET LOCKED] "${d.title}" | Similarity: ${d.sim} | Conf: ${d.conf} (${elapsed}ms)`, "ok");
+        if (d.cam_xyz) log(`[CAMERA 3D] X=${d.cam_xyz[0]}m, Y=${d.cam_xyz[1]}m, Z=${d.cam_xyz[2]}m`, "info");
+        if (d.robot_xyz) log(`[DOBOT 3D] X=${d.robot_xyz[0]}mm, Y=${d.robot_xyz[1]}mm, Z=${d.robot_xyz[2]}mm`, "warn");
+      }
+
+      // Smoothly scroll down to "Send to arm" button and highlight it
+      const sendBtn = $("send");
+      sendBtn.disabled = !d.robot_xyz;
+      $("sendTxt").textContent = d.robot_xyz ? "Send to arm" : "Send to arm (unreachable)";
+      setTimeout(() => {
+        sendBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        sendBtn.classList.add("pulse-ready");
+        setTimeout(() => sendBtn.classList.remove("pulse-ready"), 3000);
+      }, 100);
+
+      // Autonomous pick mode
+      if (autoPickEl && autoPickEl.checked && d.robot_xyz) {
+        log("[AUTONOMOUS] Full autonomous pick engaged: dispatching Dobot in 1.5s...", "warn");
+        toast("Autonomous Pick: Dispatching arm in 1.5s... Click 'Re-scan' to cancel");
+        sendBtn.classList.add("auto-counting");
+        $("sendTxt").textContent = "Auto-dispatching in 1.5s...";
+        clearTimeout(autoTimer);
+        autoTimer = setTimeout(() => {
+          sendBtn.classList.remove("auto-counting");
+          if (busy) return;
+          log("[AUTONOMOUS] Dispatching Dobot arm now!", "ok");
+          sendBtn.click();
+        }, 1500);
+      }
+    }
+  } catch (e) {
+    phStop();
+    ph = -1;
+    log("[SYSTEM ERROR] Search failed: " + e.message, "err");
+    setBadge("Error", "miss");
+    setSteps(0);
+    $("camBanner").textContent = "Request failed";
+  } finally {
+    phStop();
+    ph = -1;
+    cam.classList.remove("scanning");
+    busy = false;
+    $("go").disabled = false;
+    $("go").classList.remove("busy");
+    $("go").textContent = "Find book";
+  }
+}
+$("go").onclick = find;
+$("q").onkeydown = e => { if (e.key === "Enter") find(); };
+
+function renderTarget(){
+  pts={cam:null,rob:null};
+  setBadge("Standby");
+  $("resPanel").classList.remove("hit");
+  $("title").className="title empty";
+  $("title").textContent="No target yet.";
+  $("note").textContent="";
+  setXYZ("c",null);
+  setXYZ("r",null);
+  meter("confV","confF",null);
+  meter("simV","simF",null);
+  $("boxRob").classList.add("off");
   $("send").disabled=true;
-  const r=await fetch("/api/send",{method:"POST"});const d=await r.json();
-  log(d.ok?"arm: command sent":"arm: failed "+(d.error||""),d.ok?"#3DD6B0":"#F2B84B");$("send").disabled=false};
+  $("sendTxt").textContent="Send to arm";
+  $("vRob").disabled=true;
+  setView("cam");
+  setSteps(0);
+  $("camBanner").textContent="Ready";
+}
+
+async function resetLive(){
+  clearTimeout(autoTimer);
+  phStop();
+  ph = -1;
+  cam.classList.remove("locked", "scanning");
+  $("send").classList.remove("auto-counting");
+  try { await fetch("/api/clear", { method: "POST" }); } catch (e) {}
+  renderTarget();
+  log("[CAMERA] Reset to live optical feed", "info");
+  toast("Camera reset to live feed");
+}
+$("btnLiveCam").onclick = e => { e.stopPropagation(); resetLive(); };
+$("rescan").onclick = () => { resetLive(); if ($("q").value) find(); };
+cam.onclick = () => { if (cam.classList.contains("locked")) resetLive(); };
+
+/* send */
+$("send").onclick = async () => {
+  clearTimeout(autoTimer);
+  $("send").classList.remove("auto-counting");
+  if (!pts.rob) return;
+  const b = $("send");
+  b.disabled = true;
+  b.className = "btn send waiting";
+  $("sendTxt").textContent = "Dispatching…";
+  log(`[ARM DISPATCH] Sending target coordinates to Dobot controller on COM7...`, "info");
+  log(`[ARM TARGET] X=${pts.rob[0]} mm, Y=${pts.rob[1]} mm, Z=${pts.rob[2]} mm`, "info");
+  try {
+    const r = await fetch("/api/send", { method: "POST" });
+    const d = await r.json();
+    b.className = "btn send " + (d.ok ? "ok" : "bad");
+    $("sendTxt").textContent = d.ok ? "Sent" : "Failed";
+    log(d.ok ? "[DOBOT CONTROLLER] Pick trajectory executed successfully: Home -> Approach -> Suction -> Lift -> Drop" : "[DOBOT ERROR] Arm movement failed: " + (d.error || "kinematics limit"), d.ok ? "ok" : "err");
+    toast(d.ok ? "Dobot arm pick completed!" : "Dobot arm movement failed");
+  } catch (e) {
+    b.className = "btn send bad";
+    $("sendTxt").textContent = "Failed";
+    log("[DOBOT ERROR] Hardware communication error: " + e.message, "err");
+  }
+  setTimeout(() => {
+    b.className = "btn send";
+    $("sendTxt").textContent = "Send to arm";
+    b.disabled = !pts.rob;
+  }, 3000);
+};
+
+/* voice */
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-if(SR){$("mic").onclick=()=>{const r=new SR();r.lang="en-US";r.onresult=e=>{$("q").value=e.results[0][0].transcript;find()};r.start();log("listening...")}}
+if(SR){$("mic").onclick=()=>{const r=new SR(),m=$("mic");r.lang="en-US";
+  r.onresult=e=>{$("q").value=e.results[0][0].transcript;find()};
+  r.onend=()=>m.classList.remove("listening");r.onerror=e=>{m.classList.remove("listening");log("voice: "+e.error,"warn")};
+  r.start();m.classList.add("listening");log("listening")}}
 else $("mic").disabled=true;
+/* keyboard */
+addEventListener("keydown",e=>{
+  const typing=/INPUT|TEXTAREA/.test(document.activeElement.tagName);
+  if(e.key==="/"&&!typing){e.preventDefault();$("q").focus()}
+  if(e.key==="Escape")document.activeElement.blur();
+});
+/* 3D viewport */
+const cv=$("cv"),ctx=cv.getContext("2d");
+let W=0,H=0,yaw=-.55,pitch=.5,touched=false,drag=null,Rcur=.5,cur=[0,0,0];
+function size(){const r=cv.getBoundingClientRect(),d=devicePixelRatio||1;W=r.width;H=r.height;cv.width=W*d;cv.height=H*d;ctx.setTransform(d,0,0,d,0,0)}
+new ResizeObserver(size).observe(cv);
+function setView(v){view=v;$("vCam").classList.toggle("on",v==="cam");$("vRob").classList.toggle("on",v==="rob")}
+$("vCam").onclick=()=>setView("cam");$("vRob").onclick=()=>{if(pts.rob)setView("rob")};
+cv.addEventListener("pointerdown",e=>{drag=[e.clientX,e.clientY];touched=true;cv.setPointerCapture(e.pointerId)});
+cv.addEventListener("pointermove",e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.01;pitch=Math.max(.1,Math.min(1.4,pitch+(e.clientY-drag[1])*.01));drag=[e.clientX,e.clientY]});
+cv.addEventListener("pointerup",()=>drag=null);
+cv.addEventListener("dblclick",()=>{yaw=-.55;pitch=.5;touched=false});
+const toWorld=(v,p)=>v==="cam"?[p[0],-p[1],p[2]]:[p[0]/1000,p[2]/1000,p[1]/1000];
+const INK="#F1F4F9",MUTE="#768194",ACC="#3B82F6";
+function frame(now){
+  requestAnimationFrame(frame);if(!W)return;
+  const t=now/1000,camV=view==="cam",p=pts[view]?toWorld(view,pts[view]):null;
+  const ext=p?Math.max(Math.abs(p[0]),Math.abs(p[1]),camV?Math.abs(p[2])/2:Math.abs(p[2])):0;
+  Rcur+=(Math.max(.3,ext*1.4)-Rcur)*.1;const R=Rcur;
+  if(p)for(let i=0;i<3;i++)cur[i]+=(p[i]-cur[i])*.12;
+  const yw=yaw+(touched||REDUCED?0:Math.sin(t*.4)*.1);
+  const zc=camV?R:0,zmin=camV?0:-R,zmax=camV?2*R:R,S=Math.min(W,H)/(R*3.1);
+  const P=(x,y,z)=>{z-=zc;const c=Math.cos(yw),s=Math.sin(yw),x1=x*c+z*s,z1=-x*s+z*c,cp=Math.cos(pitch),sp=Math.sin(pitch);return[W/2+x1*S,H/2+8-(y*cp+z1*sp)*S]};
+  ctx.clearRect(0,0,W,H);ctx.lineWidth=1;ctx.font="10px 'IBM Plex Mono',monospace";
+  const step=R/4;ctx.strokeStyle="rgba(255,255,255,.09)";ctx.beginPath();
+  for(let x=-R;x<=R+1e-6;x+=step){ctx.moveTo(...P(x,0,zmin));ctx.lineTo(...P(x,0,zmax))}
+  for(let z=zmin;z<=zmax+1e-6;z+=step){ctx.moveTo(...P(-R,0,z));ctx.lineTo(...P(R,0,z))}
+  ctx.stroke();
+  ctx.fillStyle=MUTE;const e=P(R,0,zmin);ctx.fillText(R.toFixed(2)+" m",e[0]+4,e[1]);
+  const L=R*.45,o=P(0,0,0);ctx.strokeStyle="rgba(255,255,255,.4)";ctx.fillStyle=MUTE;
+  [[[L,0,0],"X"],[[0,L,0],camV?"-Y":"Z"],[[0,0,L],camV?"Z":"Y"]].forEach(([v,n])=>{const a=P(...v);ctx.beginPath();ctx.moveTo(...o);ctx.lineTo(...a);ctx.stroke();ctx.fillText(n,a[0]+4,a[1]-4)});
+  ctx.strokeStyle=INK;
+  if(camV){const h=R*.06,d=R*.14,pp=[[-h,-h,d],[h,-h,d],[h,h,d],[-h,h,d]].map(v=>P(...v));
+    ctx.beginPath();pp.forEach((q,i)=>{ctx.moveTo(...o);ctx.lineTo(...q);ctx.moveTo(...q);ctx.lineTo(...pp[(i+1)%4])});ctx.stroke()}
+  else ctx.strokeRect(o[0]-6,o[1]-6,12,12);
+  if(!p){ctx.fillStyle="#555E70";ctx.font="12px 'IBM Plex Sans',sans-serif";ctx.textAlign="center";ctx.fillText("Target appears here after a search",W/2,H/2-26);ctx.textAlign="left";return}
+  const pt=P(...cur),fl=P(cur[0],0,cur[2]);
+  ctx.strokeStyle="rgba(59,130,246,.35)";ctx.beginPath();ctx.moveTo(...o);ctx.lineTo(...pt);ctx.stroke();
+  ctx.setLineDash([3,3]);ctx.strokeStyle="rgba(59,130,246,.7)";ctx.beginPath();ctx.moveTo(...pt);ctx.lineTo(...fl);ctx.stroke();ctx.setLineDash([]);
+  ctx.strokeStyle="rgba(59,130,246,.5)";ctx.beginPath();
+  for(let i=0;i<=24;i++){const a=i/24*Math.PI*2,q=P(cur[0]+Math.cos(a)*R*.05,0,cur[2]+Math.sin(a)*R*.05);i?ctx.lineTo(...q):ctx.moveTo(...q)}ctx.stroke();
+  if(!REDUCED){const k=((now-ping)/1600)%1;ctx.strokeStyle=`rgba(59,130,246,${.6*(1-k)})`;ctx.beginPath();ctx.arc(pt[0],pt[1],5+k*14,0,7);ctx.stroke()}
+  ctx.fillStyle=ACC;ctx.beginPath();ctx.arc(pt[0],pt[1],4,0,7);ctx.fill();
+  ctx.fillStyle=INK;ctx.font="11px 'IBM Plex Mono',monospace";ctx.fillText(Math.hypot(p[0],p[1],p[2]).toFixed(2)+" m",pt[0]+10,pt[1]-8);
+}
+requestAnimationFrame(frame);
+
+/* Clean camera overlay: subtle high-tech scan beam during search */
+const ov=$("ov"),o=ov.getContext("2d");
+function ovDraw(now){
+  requestAnimationFrame(ovDraw);
+  const r=ov.getBoundingClientRect(),d=devicePixelRatio||1,w=r.width,h=r.height;
+  if(ov.width!==Math.round(w*d)){ov.width=Math.round(w*d);ov.height=Math.round(h*d)}
+  o.setTransform(d,0,0,d,0,0);
+  o.clearRect(0,0,w,h);
+  if(ph<0||!cam.classList.contains("scanning"))return;
+  const el=now-phT;
+  const p=(el%2000)/2000;
+  const y=p*h;
+  const g=o.createLinearGradient(0,y-40,0,y);
+  g.addColorStop(0,"rgba(59,130,246,0)");
+  g.addColorStop(1,"rgba(59,130,246,0.18)");
+  o.fillStyle=g;
+  o.fillRect(0,y-40,w,40);
+  o.fillStyle="rgba(96,165,250,0.85)";
+  o.fillRect(0,y,w,1.5);
+}
+requestAnimationFrame(ovDraw);
+
+/* Minimal ambient background: subtle glow + 40 calm drifting stardust */
+const bgc=$("bg"),bx=bgc.getContext("2d");let bw,bh,mx=-999,my=-999;
+const PC=["200,215,255","147,197,253","165,180,252","125,211,252"];
+const SD=Array.from({length:42},()=>({x:Math.random(),y:Math.random(),r:Math.random()*1.3+.4,v:Math.random()*.00015+.00003,dx:(Math.random()-.5)*.00008,c:PC[Math.floor(Math.random()*4)],p:Math.random()*6}));
+function bsz(){const d=devicePixelRatio||1;bw=innerWidth;bh=innerHeight;bgc.width=bw*d;bgc.height=bh*d;bx.setTransform(d,0,0,d,0,0)}addEventListener("resize",bsz);bsz();
+addEventListener("pointermove",e=>{mx=e.clientX;my=e.clientY});
+function bgLoop(now){
+  requestAnimationFrame(bgLoop);
+  const t=now/1000;
+  bx.clearRect(0,0,bw,bh);
+  [[.2,.25,"59,130,246"],[.8,.35,"99,102,241"],[.5,.9,"14,165,233"]].forEach(([x,y,c],i)=>{
+    const X=(x+Math.sin(t*.1+i*2)*.08)*bw,Y=(y+Math.cos(t*.08+i)*.08)*bh,R=Math.max(bw,bh)*(.45+.08*Math.sin(t*.2+i)),g=bx.createRadialGradient(X,Y,0,X,Y,R);
+    g.addColorStop(0,"rgba("+c+",.07)");g.addColorStop(1,"rgba("+c+",0)");bx.fillStyle=g;bx.fillRect(0,0,bw,bh)
+  });
+  SD.forEach(s=>{
+    if(!REDUCED){s.y-=s.v;s.x+=s.dx;if(s.y<-.02){s.y=1.02;s.x=Math.random()}if(s.x<-.02)s.x=1.02;if(s.x>1.02)s.x=-.02}
+    let X=s.x*bw,Y=s.y*bh;
+    bx.fillStyle="rgba("+s.c+","+(.18+.25*Math.abs(Math.sin(now/1400+s.p)))+")";
+    bx.beginPath();bx.arc(X,Y,s.r,0,7);bx.fill();
+  });
+}
+requestAnimationFrame(bgLoop);
 </script></body></html>

@@ -280,14 +280,23 @@ def compute_title_similarity(ocr_text, query_title, target_book=None):
                     break
 
         # Check aliases
+        alias_matched = False
+        text_nospace = text_lower.replace(" ", "").replace("-", "")
         for alias in target_book.get("aliases", []):
             al_low = alias.lower()
-            if al_low in text_lower or (len(al_low) >= 4 and al_low in text_lower):
-                author_boost = max(author_boost, 0.45)
+            al_nospace = al_low.replace(" ", "").replace("-", "")
+            if (al_low in text_lower) or (len(al_nospace) >= 4 and al_nospace in text_nospace):
+                if len(al_nospace) >= 6 or len(al_low.split()) >= 2:
+                    alias_matched = True
+                    author_boost = max(author_boost, 0.85)
+                else:
+                    author_boost = max(author_boost, 0.45)
                 break
 
     # If significant title words matched and author also confirmed, boost to high confidence!
-    if fuzzy_score >= 0.30 and author_boost > 0.0:
+    if alias_matched:
+        fuzzy_score = max(fuzzy_score, 0.95)
+    elif fuzzy_score >= 0.18 and author_boost > 0.0:
         fuzzy_score = min(1.0, max(0.85, fuzzy_score + author_boost))
     elif author_boost >= 0.40 and any(qw in author_name for qw in q_tokens):
         # User query itself specifically mentioned the author

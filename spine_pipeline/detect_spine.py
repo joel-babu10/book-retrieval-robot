@@ -275,6 +275,7 @@ def detect_spines(image_path=None, image=None, conf_threshold=CONF_THRESHOLD, mo
         top_two = top_two[np.argsort(top_two[:, 0])]
         tl, tr = top_two[0], top_two[1]
 
+        # Center of the top edge: horizontal midpoint between top corners
         top_edge_center_u = float((tl[0] + tr[0]) / 2.0)
         top_edge_center_v = float((tl[1] + tr[1]) / 2.0)
         pick_endpoints = [(float(tl[0]), float(tl[1])), (float(tr[0]), float(tr[1]))]
@@ -283,7 +284,7 @@ def detect_spines(image_path=None, image=None, conf_threshold=CONF_THRESHOLD, mo
         v_in_u = center_u - top_edge_center_u
         v_in_v = center_v - top_edge_center_v
         dist_to_center = float(np.hypot(v_in_u, v_in_v))
-        inset_px = min(35.0, max(15.0, dist_to_center * 0.08)) if dist_to_center > 0 else 0.0
+        inset_px = min(20.0, max(8.0, dist_to_center * 0.05)) if dist_to_center > 0 else 0.0
         pick_u = top_edge_center_u + (v_in_u / max(dist_to_center, 1e-4)) * inset_px
         pick_v = top_edge_center_v + (v_in_v / max(dist_to_center, 1e-4)) * inset_px
 
@@ -294,6 +295,8 @@ def detect_spines(image_path=None, image=None, conf_threshold=CONF_THRESHOLD, mo
             "center": (center_u, center_v),
             "width_px": spine_width_px,
             "top_edge_center": (pick_u, pick_v),
+            "pick_point_2d": (pick_u, pick_v),
+            "pick_point_px": [pick_u, pick_v],
             "pick_edge_endpoints": pick_endpoints,
         })
 

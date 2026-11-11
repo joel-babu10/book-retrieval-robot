@@ -31,15 +31,37 @@ DEFAULT_PORT = "COM7"
 TRANSIT_MAX_HEIGHT_Z = 165.0
 
 
+def compute_front_facing_rotation(x, y, edge_angle_deg=0.0):
+    """
+    Computes gripper rotation R for front-facing upright books.
+    J1 = arctan2(y, x). Wrist J4 ≈ -90° aligns jaws horizontally across the top rim.
+    Applies 180° symmetry to guarantee jaws enter 180° parallel to the book within joint limits.
+    """
+    import math
+    j1 = math.degrees(math.atan2(y, x))
+    tilt = float(edge_angle_deg) if (edge_angle_deg is not None and abs(float(edge_angle_deg)) <= 45.0) else 0.0
+    r1 = (j1 - 90.0 + tilt + 180.0) % 360.0 - 180.0
+    r2 = (j1 + 90.0 + tilt + 180.0) % 360.0 - 180.0
+    j4_1 = (r1 - j1 + 180.0) % 360.0 - 180.0
+    j4_2 = (r2 - j1 + 180.0) % 360.0 - 180.0
+
+    if -140.0 <= j4_1 <= 140.0 and abs(r1) <= abs(r2):
+        return round(r1, 1)
+    elif -140.0 <= j4_2 <= 140.0:
+        return round(r2, 1)
+    return round(r1, 1)
+
+
 def compute_parallel_rotation(x, y):
     """
-    Computes gripper rotation R parallel to the book spine.
-    When Dobot points at the shelf target (x, y) with base azimuth
-    J1 = arctan2(y, x), keeping wrist J4 = 0° aligns gripper jaws parallel to
-    the upright spine: R = J1 = arctan2(y, x), verified in DobotStudio (R=82.2° at X=35.5, Y=258.4).
+    Computes gripper rotation R parallel to the upright book spine.
+    Fitted across verified ground-truth poses from DobotStudio:
+      - Point 1 (Right,  X=+15.1mm): R = 123.1° (J1=87.0°,  J4=+36.1°)
+      - Point 2 (Center, X=-26.1mm): R = 108.8° (J1=95.4°,  J4=+13.4°)
+      - Point 3 (Left,   X=-59.1mm): R = 125.9° (J1=102.5°, J4=+23.4°)
     """
-    az = float(np.degrees(np.arctan2(y, x)))
-    return round(az, 1)
+    import cam2robot as c2r
+    return c2r.get_spine_parallel_rotation(x, y)
 
 
 def compute_max_height_at(x, y, fallback=165.0):
@@ -84,6 +106,10 @@ class DobotController:
         self.connect(port)
 
     @staticmethod
+    def compute_front_facing_rotation(x, y, edge_angle_deg=0.0):
+        return compute_front_facing_rotation(x, y, edge_angle_deg)
+
+    @staticmethod
     def compute_parallel_rotation(x, y):
         return compute_parallel_rotation(x, y)
 
@@ -122,7 +148,7 @@ class DobotController:
             pass
         return DEFAULT_PORT
 
-    def camera_to_dobot_coordinates(self, camera_xyz_m):
+    def camera_to_dobot_coordinates(self, camera_xyz_m, mode=None):
         """
         Transforms 3D coordinates from RealSense Optical Frame (meters or mm)
         to Dobot Magician Base Frame (millimeters).
@@ -134,7 +160,7 @@ class DobotController:
         try:
             import cam2robot as c2r
             if c2r.is_calibrated():
-                rob = c2r.cam_to_robot(camera_xyz_m)
+                rob = c2r.cam_to_robot(camera_xyz_m, mode=mode)
                 return np.array([float(rob[0]), float(rob[1]), float(rob[2])])
         except Exception:
             pass
@@ -144,12 +170,12 @@ class DobotController:
         if np.max(np.abs([xc, yc, zc])) < 5.0:
             xc, yc, zc = xc * 1000.0, yc * 1000.0, zc * 1000.0
 
-        xr = 0.394764 * xc - 0.908681 * zc + 288.209
-        yr = 0.852790 * xc + 0.064282 * zc + 356.924
-        zr = -0.980158 * yc - 0.020429 * zc + 116.693
+        xr = 0.394764 * xc - 0.908681 * zc + 326.131
+        yr = 0.852790 * xc + 0.064282 * zc + 340.413
+        zr = -0.980158 * yc - 0.020429 * zc + 119.636
         return np.array([xr, yr, zr])
 
-    def execute_pick_sequence(self, target_xyz_m, grasp_angle_deg=None, is_spine=False, update_ui=None):
+    def execute_pick_sequence(self, target_xyz_m, grasp_angle_deg=None, is_spine=False, is_front_facing=False, update_ui=None):
         """
         Executes complete autonomous pick and retrieval sequence:
           1. Ascend to Maximum Height using J2 (Clearance Elevation) & open jaws
@@ -161,11 +187,16 @@ class DobotController:
           7. Transfer to Drop Zone at transit clearance & deposit book
           8. Retract arm cleanly to Home standby
         """
-        robot_xyz = self.camera_to_dobot_coordinates(target_xyz_m)
+        calib_mode = 'vertical' if is_front_facing else ('spine' if is_spine else 'scattered')
+        robot_xyz = self.camera_to_dobot_coordinates(target_xyz_m, mode=calib_mode)
         rx, ry, rz = float(robot_xyz[0]), float(robot_xyz[1]), float(robot_xyz[2])
 
-        # Any target on the bookshelf (Z >= 60mm) or marked as spine MUST use verified shelf-parallel rotation
-        if is_spine or rz >= 60.0 or grasp_angle_deg is None:
+        # Compute gripper rotation based on target orientation:
+        # - Front-facing scattered book: wrist turns perpendicular to radial arm (R ≈ J1 - 90° ≈ 8.7°)
+        # - Shelf spine (Z >= 60mm): wrist aligns parallel with radial arm (R = J1)
+        if is_front_facing:
+            r_angle = compute_front_facing_rotation(rx, ry, grasp_angle_deg or 0.0)
+        elif is_spine or rz >= 60.0 or grasp_angle_deg is None:
             r_angle = compute_parallel_rotation(rx, ry)
         else:
             r_angle = float(grasp_angle_deg)
@@ -174,7 +205,7 @@ class DobotController:
         transit_z = float(min(TRANSIT_MAX_HEIGHT_Z, z_max_shelf))
         dx, dy, dz, dr = DEPOSIT_ZONE
 
-        print(f"\n================ DOBOT MAGICIAN EXECUTION ================", flush=True)
+        print(f"\n[Dobot Magician Execution]", flush=True)
         print(f"Target Camera Optical:  XYZ = {target_xyz_m}", flush=True)
         print(f"Dobot Arm Coordinates:  X={rx:.1f}mm, Y={ry:.1f}mm, Z={rz:.1f}mm, R={r_angle:.1f}°", flush=True)
         print(f"Ceiling Max Height:     Z={z_max_shelf:.1f}mm (using J2 elevation)", flush=True)
@@ -184,6 +215,20 @@ class DobotController:
         # Validate kinematic limits before executing physical motions
         r_reach = float(np.hypot(rx, ry))
         reach_ok, reach_reason, _ = K.check(rx, ry, rz)
+
+        # For scattered flat desk books: if position is beyond reach, try candidate on book closer to arm
+        if not reach_ok and not is_spine and r_reach > 310.0:
+            scale = 290.0 / r_reach
+            adj_rx, adj_ry = rx * scale, ry * scale
+            adj_ok, _, _ = K.check(adj_rx, adj_ry, rz)
+            if adj_ok:
+                print(f"[Dobot Reachability Guard] Shifted scattered pick from unreachable r={r_reach:.1f}mm to reachable position on book: ({adj_rx:.1f}, {adj_ry:.1f}, {rz:.1f}) mm (r=290.0mm).", flush=True)
+                rx, ry = adj_rx, adj_ry
+                r_reach = 290.0
+                reach_ok = True
+                if grasp_angle_deg is None:
+                    r_angle = compute_parallel_rotation(rx, ry)
+
         if not reach_ok:
             is_bg_depth = (target_xyz_m is not None and len(target_xyz_m) >= 3 and float(target_xyz_m[2]) > 0.46)
             bg_hint = " Depth was sampled from background wall (>0.46m)." if is_bg_depth else ""
@@ -226,51 +271,26 @@ class DobotController:
                 except Exception:
                     movl_mode = None
 
-                if not is_spine:
-                    # Scattered Book: Target height is at book surface Z ≈ 3.0 mm (verified in DobotStudio)
-                    target_pick_z = 3.0 if rz < 3.0 else float(min(rz, 35.0))
-                    hover_z = target_pick_z + 47.0  # ~50 mm overhead hover
-                    transit_overhead_z = float(min(z_max_shelf, 130.0))
+                target_pick_z = float(max(rz, 2.0))
 
-                    # 3a. Transit overhead at safe ceiling clearance (preventing J3 negative limit)
-                    msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {transit_overhead_z:.1f}) mm..."
-                    print(f"  [3/8] {msg_3}", flush=True)
-                    if update_ui:
-                        update_ui(msg_3, stage_num=3)
-                    self.bot.move_to(rx, ry, transit_overhead_z, r_angle, wait=True)
-                    time.sleep(0.2)
+                # 3. Transit overhead to target (rx, ry) strictly at Maximum Height ("go there")
+                msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm at maximum height..."
+                print(f"  [3/8] {msg_3}", flush=True)
+                if update_ui:
+                    update_ui(msg_3, stage_num=3)
+                self.bot.move_to(rx, ry, z_max_shelf, r_angle, wait=True)
+                time.sleep(0.3)
 
-                    # 3b. Position directly ABOVE the book spine (overhead hover)
-                    msg_hover = f"Positioning directly above book spine at Z={hover_z:.1f} mm..."
-                    print(f"        {msg_hover}", flush=True)
-                    self.bot.move_to(rx, ry, hover_z, r_angle, mode=movl_mode, wait=True)
-                    time.sleep(0.3)
-
-                    # 4. Strictly Linear Vertical Descent downwards onto spine at Z ≈ 3.0 mm (ZERO horizontal push)
-                    msg_4 = f"Descending vertically downwards onto spine at Z={target_pick_z:.1f} mm..."
-                    print(f"  [4/8] {msg_4}", flush=True)
-                    if update_ui:
-                        update_ui(msg_4, stage_num=4)
-                    self.bot.move_to(rx, ry, target_pick_z, r_angle, mode=movl_mode, wait=True)
-                    time.sleep(0.4)
-                else:
-                    # Shelf Spine: Preserve exact shelf retrieval sequence untouched
-                    msg_3 = f"Transiting overhead to ({rx:.1f}, {ry:.1f}, {z_max_shelf:.1f}) mm..."
-                    print(f"  [3/8] {msg_3}", flush=True)
-                    if update_ui:
-                        update_ui(msg_3, stage_num=3)
-                    self.bot.move_to(rx, ry, z_max_shelf, r_angle, wait=True)
-                    time.sleep(0.3)
-
-                    msg_4 = f"Descending vertically down onto spine at Z={rz:.1f} mm..."
-                    print(f"  [4/8] {msg_4}", flush=True)
-                    if update_ui:
-                        update_ui(msg_4, stage_num=4)
-                    self.bot.move_to(rx, ry, rz, r_angle, wait=True)
-                    time.sleep(0.4)
+                # 4. Strictly Vertical Descent straight down into target at target_pick_z ("and go down")
+                msg_4 = f"Descending vertically down onto target at Z={target_pick_z:.1f} mm..."
+                print(f"  [4/8] {msg_4}", flush=True)
+                if update_ui:
+                    update_ui(msg_4, stage_num=4)
+                self.bot.move_to(rx, ry, target_pick_z, r_angle, wait=True)
+                time.sleep(0.4)
 
                 # 5. Clamp gripper (full pressure dwell for tight grip)
-                msg_5 = f"Clamping jaws firmly on spine (full pressure dwell)..."
+                msg_5 = f"Clamping jaws firmly on target (full pressure dwell)..."
                 print(f"  [5/8] {msg_5}", flush=True)
                 if update_ui:
                     update_ui(msg_5, stage_num=5)
@@ -278,22 +298,12 @@ class DobotController:
                 time.sleep(1.2)
 
                 # 6. Strictly Vertical Extraction: Lift book straight up using J2 to Maximum Height
-                if not is_spine:
-                    msg_6 = f"Extracting book straight up to clearance Z={hover_z:.0f} mm..."
-                    print(f"  [6/8] {msg_6}", flush=True)
-                    if update_ui:
-                        update_ui(msg_6, stage_num=6)
-                    self.bot.move_to(rx, ry, hover_z, r_angle, mode=movl_mode, wait=True)
-                    time.sleep(0.2)
-                    self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
-                    time.sleep(0.3)
-                else:
-                    msg_6 = f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2..."
-                    print(f"  [6/8] {msg_6}", flush=True)
-                    if update_ui:
-                        update_ui(msg_6, stage_num=6)
-                    self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
-                    time.sleep(0.3)
+                msg_6 = f"Extracting book straight up to Maximum Height Z={transit_z:.0f} mm using J2..."
+                print(f"  [6/8] {msg_6}", flush=True)
+                if update_ui:
+                    update_ui(msg_6, stage_num=6)
+                self.bot.move_to(rx, ry, transit_z, r_angle, wait=True)
+                time.sleep(0.3)
 
                 # 7. Transfer to Drop Zone at Maximum Height & Drop directly
                 msg_7 = f"Transferring to Drop Zone ({dx:.1f}, {dy:.1f}) at Maximum Height Z={transit_z:.1f} mm..."

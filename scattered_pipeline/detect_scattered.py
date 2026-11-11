@@ -190,7 +190,96 @@ def filter_book_detections(detections, img_width, img_height,
         if not is_nested:
             filtered.append(d)
 
+    filtered = _merge_stacked_book_fragments(filtered, img_width, img_height)
     return filtered
+
+
+def _merge_stacked_book_fragments(candidates, img_width, img_height):
+    """
+    When an upright book cover has divider graphics or banners (e.g. 'Quality is Free'),
+    the YOLO model often detects the upper cover section and lower cover section as two separate boxes.
+    This merges vertically stacked/adjacent sections into a single complete book candidate.
+    """
+    if len(candidates) < 2:
+        return candidates
+
+    merged_list = list(candidates)
+    n = len(candidates)
+    used = set()
+
+    for i in range(n):
+        if i in used:
+            continue
+        cA = candidates[i]
+        cornersA = np.asarray(cA.get("corners", cA.get("obb_corners")), dtype=float)
+        (cxA, cyA), (wA, hA), angleA = cA["obb_center"], cA["obb_size"], cA["obb_angle"]
+        yA_min, yA_max = np.min(cornersA[:, 1]), np.max(cornersA[:, 1])
+        xA_min, xA_max = np.min(cornersA[:, 0]), np.max(cornersA[:, 0])
+
+        for j in range(i + 1, n):
+            if j in used:
+                continue
+            cB = candidates[j]
+            cornersB = np.asarray(cB.get("corners", cB.get("obb_corners")), dtype=float)
+            (cxB, cyB), (wB, hB), angleB = cB["obb_center"], cB["obb_size"], cB["obb_angle"]
+            yB_min, yB_max = np.min(cornersB[:, 1]), np.max(cornersB[:, 1])
+            xB_min, xB_max = np.min(cornersB[:, 0]), np.max(cornersB[:, 0])
+
+            # Check horizontal overlap (IoU along X-axis >= 0.60)
+            x_inter = max(0.0, min(xA_max, xB_max) - max(xA_min, xB_min))
+            x_union = max(xA_max, xB_max) - min(xA_min, xB_min)
+            if x_union <= 0 or (x_inter / x_union) < 0.60:
+                continue
+
+            # Determine top vs bottom candidate
+            if cyA < cyB:
+                top_cand, bot_cand = cA, cB
+                c_top, c_bot = cornersA, cornersB
+                y_top_max, y_bot_min = yA_max, yB_min
+            else:
+                top_cand, bot_cand = cB, cA
+                c_top, c_bot = cornersB, cornersA
+                y_top_max, y_bot_min = yB_max, yA_min
+
+            # Vertical adjacency: the bottom of top_cand is close to or overlaps top of bot_cand
+            if y_bot_min <= (y_top_max + 45.0) and y_bot_min >= (y_top_max - max(hA, hB) * 0.85):
+                c_top_sorted = c_top[np.argsort(c_top[:, 1])]
+                top_two = c_top_sorted[:2]
+                top_two = top_two[np.argsort(top_two[:, 0])]
+                tl, tr = top_two[0], top_two[1]
+
+                c_bot_sorted = c_bot[np.argsort(c_bot[:, 1])]
+                bot_two = c_bot_sorted[2:]
+                bot_two = bot_two[np.argsort(bot_two[:, 0])]
+                bl, br = bot_two[0], bot_two[1]
+
+                merged_corners = np.array([tl, tr, br, bl], dtype=np.float32)
+                rect = cv2.minAreaRect(merged_corners)
+                (cx_m, cy_m), (wm, hm), ang_m = rect
+
+                top_edge_u = float((tl[0] + tr[0]) / 2.0)
+                top_edge_v = float((tl[1] + tr[1]) / 2.0)
+
+                merged_cand = {
+                    "conf": max(top_cand.get("conf", 0.85), bot_cand.get("conf", 0.85)),
+                    "mask_contour": merged_corners.astype(np.int32),
+                    "obb_center": (cx_m, cy_m),
+                    "obb_size": (wm, hm),
+                    "obb_angle": ang_m,
+                    "obb_corners": merged_corners,
+                    "corners": merged_corners,
+                    "center": (cx_m, cy_m),
+                    "width_px": float(min(wm, hm)),
+                    "height_px": float(max(wm, hm)),
+                    "top_edge_center": (top_edge_u, top_edge_v),
+                    "bounding_rect": cv2.boundingRect(merged_corners.astype(np.int32)),
+                }
+                merged_list.append(merged_cand)
+                used.add(i)
+                used.add(j)
+                break
+
+    return [c for idx, c in enumerate(merged_list) if idx not in used]
 
 
 def detect_books(image_path=None, image=None, pil_image=None, conf_threshold=CONF_THRESHOLD):
@@ -236,10 +325,15 @@ def detect_books(image_path=None, image=None, pil_image=None, conf_threshold=CON
                     obb_corners = cv2.boxPoints(rect)
                     (cx, cy), (w, h), angle = rect
 
-                    sorted_by_y = obb_corners[np.argsort(obb_corners[:, 1])]
-                    top_two = sorted_by_y[:2]
-                    top_edge_center_u = float(np.mean(top_two[:, 0]))
-                    top_edge_center_v = float(np.mean(top_two[:, 1]))
+                    try:
+                        from shared.sam_refine import extract_refined_pick_edge
+                        pick_info = extract_refined_pick_edge(obb_corners, pick_location="spine_mid", img=cv_image)
+                        top_edge_center_u, top_edge_center_v = pick_info["pick_point_2d"]
+                    except Exception:
+                        sorted_by_y = obb_corners[np.argsort(obb_corners[:, 1])]
+                        top_two = sorted_by_y[:2]
+                        top_edge_center_u = float(np.mean(top_two[:, 0]))
+                        top_edge_center_v = float(np.mean(top_two[:, 1]))
 
                     raw_detections.append({
                         "conf": conf,

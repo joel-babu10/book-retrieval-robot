@@ -17,7 +17,7 @@ import numpy as np
 import pyrealsense2 as rs
 
 DEFAULT_DEPTH_PATCH_SIZE = 5
-MAX_FOREGROUND_DEPTH = 0.46  # Max depth (m) for books on table/shelf; background wall is >= 0.50m
+MAX_FOREGROUND_DEPTH = 0.70  # Max depth (m) for books on table/shelf (rejects far room background)
 MIN_PHYSICAL_DEPTH = 0.15    # Min valid physical depth (m) to reject near-lens artifacts
 
 
@@ -95,7 +95,18 @@ def extract_robust_book_depth(depth_frame, corners=None, center=None,
                 if len(fg) >= 3:
                     return float(np.median(fg))
 
-        # 2. Central axis / center point fallback
+        # 2. Non-eroded polygon fallback if book spine is narrow (<20px)
+        if poly_pts is not None:
+            mask_raw = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask_raw, [poly_pts], 255)
+            valid_raw = arr[(mask_raw > 0) & (arr >= MIN_PHYSICAL_DEPTH) & (arr <= max_depth)]
+            if len(valid_raw) >= 3:
+                p10 = float(np.percentile(valid_raw, 10))
+                fg = valid_raw[valid_raw <= (p10 + 0.08)]
+                if len(fg) >= 2:
+                    return float(np.median(fg))
+
+        # 3. Central axis / center point fallback
         if center is not None:
             cx, cy = int(round(center[0])), int(round(center[1]))
             for r in [int(6 * scale), int(12 * scale), int(18 * scale)]:
@@ -144,8 +155,17 @@ def deproject_target(depth_frame, color_intrinsics, u, v, patch_size=DEFAULT_DEP
         if reference_depth is not None:
             final_depth = reference_depth
         else:
-            print(f"[Depth] No valid depth at ({u:.0f},{v:.0f}) and no reference depth available.", flush=True)
-            return None
+            # Fallback to closest valid scene cluster within foreground range
+            arr = np.asanyarray(depth_frame.get_data()) * 0.001
+            valid_scene = arr[(arr >= MIN_PHYSICAL_DEPTH) & (arr <= max_depth)]
+            if len(valid_scene) >= 10:
+                p10 = float(np.percentile(valid_scene, 10))
+                fg = valid_scene[valid_scene <= (p10 + 0.08)]
+                final_depth = float(np.median(fg)) if len(fg) > 0 else float(np.median(valid_scene))
+                print(f"[Depth] Using scene foreground fallback depth: {final_depth:.3f} m", flush=True)
+            else:
+                print(f"[Depth] No valid depth at ({u:.0f},{v:.0f}) and no reference depth available.", flush=True)
+                return None
 
     point_3d = rs.rs2_deproject_pixel_to_point(color_intrinsics, [float(u), float(v)], final_depth)
     x, y, z = point_3d

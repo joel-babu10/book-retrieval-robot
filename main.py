@@ -27,8 +27,14 @@ if __name__ == "__main__" and _VENV_PY.exists():
         _has_cuda = False
 
     if not _has_cuda:
-        res = subprocess.run([str(_VENV_PY)] + sys.argv, env=os.environ.copy())
-        sys.exit(res.returncode)
+        try:
+            res = subprocess.run([str(_VENV_PY)] + sys.argv, env=os.environ.copy())
+            sys.exit(res.returncode)
+        except KeyboardInterrupt:
+            sys.exit(0)
+
+import math
+import numpy as np
 
 
 def get_user_query(cli_query=None):
@@ -117,6 +123,11 @@ def parse_args():
         action="store_true",
         help="Display internal debug and candidate detection logs",
     )
+    parser.add_argument(
+        "--calib",
+        action="store_true",
+        help="Display active camera-to-robot calibration parameters",
+    )
     args, _ = parser.parse_known_args()
     mode_map = {"1": "auto", "2": "spine", "3": "scattered", "4": "mixed"}
     args.mode = mode_map.get(args.mode, args.mode)
@@ -129,10 +140,51 @@ def run():
     verbose = args.verbose
     should_pick = args.pick and not args.no_pick
 
-    # 1. Clean Terminal Header Banner
-    print("=" * 62)
-    print("           AUTONOMOUS BOOK RETRIEVAL ROBOT            ")
-    print("=" * 62)
+    # 1. Clean Terminal Header
+    print("\nAutonomous Book Retrieval Robot")
+
+    if getattr(args, "calib", False):
+        import cam2robot as c2r
+        import numpy as np
+        print("\nCamera-to-Robot Calibration:")
+        if c2r.is_calibrated():
+            R_sp, t_sp = c2r.load(mode="spine")
+            print("1. Spine Mode (calib_spine.npz & calib.npz):")
+            print(f"   Translation t: X = {t_sp[0]:.2f}, Y = {t_sp[1]:.2f}, Z = {t_sp[2]:.2f} mm")
+            sample_cam = np.array([-42.2, -8.5, 310.0])
+            sample_rob = c2r.cam_to_robot(sample_cam, mode="spine")
+            from robot.dobot_controller import compute_parallel_rotation, compute_front_facing_rotation
+            r_par = compute_parallel_rotation(sample_rob[0], sample_rob[1])
+            r_front = compute_front_facing_rotation(sample_rob[0], sample_rob[1])
+            print(f"   Benchmark Target: X = {sample_rob[0]:.1f}, Y = {sample_rob[1]:.1f}, Z = {sample_rob[2]:.1f} mm")
+            print(f"   Grasp R: Spine = {r_par:+.1f} deg | Front-Facing = {r_front:+.1f} deg")
+
+            if c2r.CALIB_SCATTERED.exists():
+                R_sc, t_sc = c2r.load(mode="scattered")
+                print("\n2. Tabletop Scattered Mode (calib_scattered.npz):")
+                print(f"   Translation t: X = {t_sc[0]:.2f}, Y = {t_sc[1]:.2f}, Z = {t_sc[2]:.2f} mm")
+                sample_cam_sc = np.array([-0.057, 0.058, 0.235])
+                sample_rob_sc = c2r.cam_to_robot(sample_cam_sc, mode="scattered")
+                j1_sc = float(np.degrees(np.arctan2(sample_rob_sc[1], sample_rob_sc[0])))
+                print(f"   Benchmark Target: X = {sample_rob_sc[0]:.1f}, Y = {sample_rob_sc[1]:.1f}, Z = {sample_rob_sc[2]:.1f} mm")
+                print(f"   Grasp R: Table Surface = {j1_sc:+.1f} deg (J1={j1_sc:.1f}°, J4=0.0°)")
+
+            if c2r.CALIB_VERTICAL.exists():
+                R_vert, t_vert = c2r.load(mode="vertical")
+                print("\n3. Scattered Vertical Mode (calib_vertical.npz):")
+                print(f"   Translation t: X = {t_vert[0]:.2f}, Y = {t_vert[1]:.2f}, Z = {t_vert[2]:.2f} mm")
+                sample_cam_vert = np.array([-96.8, -9.7, 314.0])
+                sample_rob_vert = c2r.cam_to_robot(sample_cam_vert, mode="vertical")
+                j1_vert = float(np.degrees(np.arctan2(sample_rob_vert[1], sample_rob_vert[0])))
+                from robot.dobot_controller import compute_front_facing_rotation
+                r_vert = compute_front_facing_rotation(sample_rob_vert[0], sample_rob_vert[1], 0.0)
+                print(f"   Benchmark Target: X = {sample_rob_vert[0]:.1f}, Y = {sample_rob_vert[1]:.1f}, Z = {sample_rob_vert[2]:.1f} mm")
+                print(f"   Grasp R: Top Rim = +188.8 deg (J1={j1_vert:.1f}°, J4=+92.3°) | Alt = {r_vert:+.1f} deg")
+        else:
+            print("Status: No calibration file found.")
+        print()
+        return None
+        return None
 
     if args.select:
         print("\nSelect arrangement mode:")
@@ -245,39 +297,50 @@ def run():
         return None
 
     # 5. Coordinate Transform & Spatial Telemetry
-    from robot.dobot_controller import get_dobot_controller, compute_parallel_rotation
+    from robot.dobot_controller import get_dobot_controller, compute_parallel_rotation, compute_front_facing_rotation
     dobot = get_dobot_controller()
     pick_xyz_m = target.get("xyz_pick_camera_frame")
     if pick_xyz_m is None:
         pick_xyz_m = target.get("xyz_center_camera_frame")
     pick_angle = target.get("pick_edge_angle_deg")
     is_spine = (target.get("arrangement_mode") == "spine" or target.get("pipeline_winner") == "SPINE" or mode == "spine")
+    is_front_facing = bool(target.get("is_front_facing", False))
 
-    robot_xyz = dobot.camera_to_dobot_coordinates(pick_xyz_m)
+    calib_mode = "vertical" if is_front_facing else ("spine" if is_spine else "scattered")
+    robot_xyz = dobot.camera_to_dobot_coordinates(pick_xyz_m, mode=calib_mode)
     rx, ry, rz = float(robot_xyz[0]), float(robot_xyz[1]), float(robot_xyz[2])
-    r_angle = compute_parallel_rotation(rx, ry) if (is_spine or rz >= 60.0 or pick_angle is None) else float(pick_angle)
+    if is_front_facing:
+        r_angle = compute_front_facing_rotation(rx, ry, pick_angle or 0.0)
+    elif is_spine:
+        r_angle = compute_parallel_rotation(rx, ry)
+    else:
+        j1 = float(math.degrees(math.atan2(ry, rx)))
+        r_angle = round(j1, 1)
 
     cx_m, cy_m, cz_m = float(pick_xyz_m[0]), float(pick_xyz_m[1]), float(pick_xyz_m[2])
     sim_score = float(target.get("similarity", 1.0)) * 100.0
     detected_title = target.get("text", query_title)
 
-    print(f"\n" + "=" * 62)
-    print(f"                    TARGET LOCALIZED                      ")
-    print(f"=" * 62)
-    print(f"  Title:            {detected_title}")
-    print(f"  OCR Match:        {sim_score:.0f}%")
-    print(f"  Camera 3D (m):    X = {cx_m:+.3f},  Y = {cy_m:+.3f},  Z = {cz_m:.3f}")
-    print(f"  Dobot 3D (mm):    X = {rx:+.1f},  Y = {ry:+.1f},  Z = {rz:.1f}")
-    print(f"  Grasp Angle:      R = {r_angle:+.1f}° ({'Parallel to shelf spine' if is_spine else 'Cover edge alignment'})")
-    print(f"=" * 62 + "\n")
+    if is_front_facing:
+        angle_desc = "Front-facing top rim alignment"
+    elif is_spine:
+        angle_desc = "Parallel to shelf spine"
+    else:
+        angle_desc = "Cover edge alignment"
+
+    print(f"\n[Target Localized] {detected_title} (OCR Match: {sim_score:.0f}%)")
+    print(f"  Camera 3D (m):  X = {cx_m:+.3f},  Y = {cy_m:+.3f},  Z = {cz_m:.3f}")
+    print(f"  Dobot 3D (mm):  X = {rx:+.1f},  Y = {ry:+.1f},  Z = {rz:.1f}")
+    print(f"  Grasp Angle:    R = {r_angle:+.1f}° ({angle_desc})\n")
 
     # 6. Physical Dobot Execution
     if should_pick:
         print("[3/3] Executing robotic retrieval & deposit sequence...", flush=True)
         pick_result = dobot.execute_pick_sequence(
             pick_xyz_m,
-            grasp_angle_deg=pick_angle,
-            is_spine=is_spine
+            grasp_angle_deg=r_angle,
+            is_spine=is_spine,
+            is_front_facing=is_front_facing
         )
         if pick_result.get("status") == "success":
             print(f"\n[SUCCESS] '{detected_title}' successfully retrieved and deposited!\n", flush=True)

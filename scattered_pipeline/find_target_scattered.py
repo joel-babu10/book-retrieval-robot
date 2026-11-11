@@ -78,6 +78,14 @@ def _pick_best_match(cv_image, detections, query_title, reader=None, min_similar
     print(f"OBB Angle:           {best['obb_angle']:.1f} deg", flush=True)
     print(f"Top-edge center:     ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f})", flush=True)
 
+    try:
+        from shared.ocr_reader import _find_catalog_book
+        cat_book = _find_catalog_book(query_title)
+        if cat_book:
+            best["title"] = cat_book.get("title", best.get("text"))
+    except Exception:
+        pass
+
     return best
 
 
@@ -85,14 +93,23 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
     """
     Refines target book coordinates using SAM.
     Supports two modes:
-      - 'fast_pick': Uses SAM strictly on the grasp edge (middle of the spine) to get the
-                     pickup point without segmenting or bounding the entire book.
+      - 'fast_pick': Uses SAM strictly on the grasp edge (middle of top edge for front-facing books,
+                     or middle of the spine for flat books) to get the pickup point.
       - 'full': Segments the entire book cover, fitting a 4-corner perspective quadrilateral.
     """
     if best is None or "corners" not in best:
         return best
 
     target_query = query_title or best.get("text")
+
+    # Front-facing upright book check:
+    from shared.sam_refine import is_front_facing_book
+    is_front = bool(is_front_facing_book(best.get("corners", best.get("obb_corners")), cv_image))
+    best["is_front_facing"] = is_front
+    if is_front:
+        if pick_location in ("spine_mid", "auto", None):
+            pick_location = "top_center"
+            print("[Scattered Target] Front-facing upright book detected! Grasping middle of top edge.", flush=True)
 
     if refine_mode == "fast_pick":
         try:
@@ -102,6 +119,9 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
             if res is not None:
                 best["pick_point_2d"] = res["pick_point_2d"]
                 best["top_edge_center"] = res["pick_point_2d"]
+                best["pick_point_px"] = [res["pick_point_2d"][0], res["pick_point_2d"][1]]
+                best["top_edge_center_u"] = res["pick_point_2d"][0]
+                best["top_edge_center_v"] = res["pick_point_2d"][1]
                 best["pick_edge_endpoints"] = res["pick_edge_endpoints"]
                 best["pick_edge_angle_deg"] = res["pick_edge_angle_deg"]
                 best["grasp_approach_angle_deg"] = res["grasp_approach_angle_deg"]
@@ -112,8 +132,10 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
                 best["obb_center"] = res["center_2d"]
                 best["pick_contour"] = res.get("pick_contour")
                 best["refine_mode"] = "fast_pick"
+                best["is_front_facing"] = bool(res.get("is_front_facing", is_front))
 
-                print(f"[SAM Fast Pick] Spine Pick Point: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f}) px | Grasp Angle: {best['pick_edge_angle_deg']:.1f}° | Approach: {best['grasp_approach_angle_deg']:.1f}°", flush=True)
+                edge_desc = "Middle of Top" if pick_location in ("top", "top_center", "front_facing", "top_mid") else "Spine Surface"
+                print(f"[SAM Fast Pick] Pick Point [{edge_desc}]: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f}) px | Grasp Angle: {best['pick_edge_angle_deg']:.1f}° | Approach: {best['grasp_approach_angle_deg']:.1f}°", flush=True)
         except Exception as e:
             print(f"[SAM Fast Pick] Target refinement fallback: {e}", flush=True)
         return best
@@ -136,6 +158,9 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
             edge_info = extract_refined_pick_edge(refined_corners, pick_location=pick_location, img=cv_image, query_title=target_query)
             best["pick_point_2d"] = edge_info["pick_point_2d"]
             best["top_edge_center"] = edge_info["pick_point_2d"]
+            best["pick_point_px"] = [edge_info["pick_point_2d"][0], edge_info["pick_point_2d"][1]]
+            best["top_edge_center_u"] = edge_info["pick_point_2d"][0]
+            best["top_edge_center_v"] = edge_info["pick_point_2d"][1]
             best["pick_edge_endpoints"] = edge_info["pick_edge_endpoints"]
             best["pick_edge_angle_deg"] = edge_info["pick_edge_angle_deg"]
             best["grasp_approach_angle_deg"] = edge_info["grasp_approach_angle_deg"]
@@ -151,6 +176,7 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
             best["width_px"] = float(min(w, h))
             best["height_px"] = float(max(w, h))
             best["refine_mode"] = "full"
+            best["is_front_facing"] = bool(edge_info.get("is_front_facing", is_front))
 
             print(f"[SAM Refine] Target refined exact coordinates -> Center: ({best['center'][0]:.1f}, {best['center'][1]:.1f}), Spine Mid Pick: ({best['top_edge_center'][0]:.1f}, {best['top_edge_center'][1]:.1f})", flush=True)
     except Exception as e:
@@ -160,138 +186,29 @@ def _refine_target_with_sam(cv_image, best, refine_mode="fast_pick", pick_locati
 
 
 def _save_visual_result(cv_image, detections, best_match, output_path, xyz=None):
-    """
-    Renders visual results cleanly on cv_image and saves to output_path.
-    Adapts based on refine_mode:
-      - 'fast_pick': Renders ONLY the precision pick target, grasp edge alignment line,
-                     and approach normal vector (no whole-book boundary clutter).
-      - 'full': Renders full translucent SAM mask shading, yellow organic contour, and green quad box.
-    """
-    img = cv_image.copy()
-    img_h, img_w = img.shape[:2]
+    if best_match is None or cv_image is None:
+        return cv_image
 
-    if best_match is not None:
-        refine_mode = best_match.get("refine_mode", "full")
-        cx, cy = best_match["center"]
-        u_top, v_top = best_match["top_edge_center"]
-        pick_angle = best_match.get("pick_edge_angle_deg", best_match.get("obb_angle", 0.0))
-        approach_angle = best_match.get("grasp_approach_angle_deg", (pick_angle + 90.0))
-
-        if refine_mode == "fast_pick":
-            # FAST PICK MODE: Render only the pickup point and grasp vector without whole-book boundary
-            pick_cnt = best_match.get("pick_contour")
-            if pick_cnt is not None and len(pick_cnt) >= 3:
-                cv2.drawContours(img, [pick_cnt.astype(np.int32)], -1, (0, 255, 255), 2, cv2.LINE_AA)
-
-            endpoints = best_match.get("pick_edge_endpoints")
-            if endpoints and len(endpoints) == 2:
-                p1 = (int(endpoints[0][0]), int(endpoints[0][1]))
-                p2 = (int(endpoints[1][0]), int(endpoints[1][1]))
-                cv2.line(img, p1, p2, (255, 255, 0), 3, cv2.LINE_AA)  # Cyan grasp edge
-                cv2.circle(img, p1, 5, (255, 255, 0), -1)
-                cv2.circle(img, p2, 5, (255, 255, 0), -1)
-
-            # Draw approach normal vector (green arrow showing arm entry direction)
-            norm_rad = np.radians(approach_angle)
-            nx = 50 * np.cos(norm_rad)
-            ny = 50 * np.sin(norm_rad)
-            cv2.arrowedLine(img, (int(u_top - nx), int(v_top - ny)), (int(u_top), int(v_top)),
-                            (0, 255, 0), 2, cv2.LINE_AA, tipLength=0.25)
-
-            # Precision Pick Point Marker (red circle with white cross)
-            cv2.circle(img, (int(u_top), int(v_top)), 8, (0, 0, 255), -1)
-            cv2.drawMarker(img, (int(u_top), int(v_top)), (255, 255, 255),
-                           markerType=cv2.MARKER_CROSS, markerSize=12, thickness=2)
-            cv2.putText(img, "PICK [SPINE MID]", (int(u_top) - 25, max(25, int(v_top) - 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 255), 2, cv2.LINE_AA)
-
-            title_header = "SAM FAST-PICK TARGET [SCATTERED]"
-
-        else:
-            # FULL BOUNDARY MODE: Translucent SAM Mask Shading & Organic Contour
-            sam_cnt = best_match.get("mask_contour")
-            if sam_cnt is not None and len(sam_cnt) >= 3:
-                mask_overlay = img.copy()
-                cv2.fillPoly(mask_overlay, [sam_cnt.astype(np.int32)], (0, 242, 254))
-                img = cv2.addWeighted(mask_overlay, 0.22, img, 0.78, 0)
-                cv2.drawContours(img, [sam_cnt.astype(np.int32)], -1, (0, 255, 255), 2, cv2.LINE_AA)
-
-            pts = best_match["obb_corners"].astype(int).reshape((-1, 1, 2))
-            cv2.polylines(img, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-
-            cv2.drawMarker(img, (int(cx), int(cy)), (255, 0, 0),
-                           markerType=cv2.MARKER_CROSS, markerSize=14, thickness=2)
-
-            endpoints = best_match.get("pick_edge_endpoints")
-            if endpoints and len(endpoints) == 2:
-                p1 = (int(endpoints[0][0]), int(endpoints[0][1]))
-                p2 = (int(endpoints[1][0]), int(endpoints[1][1]))
-                cv2.line(img, p1, p2, (255, 255, 0), 3, cv2.LINE_AA)
-                cv2.circle(img, p1, 5, (255, 255, 0), -1)
-                cv2.circle(img, p2, 5, (255, 255, 0), -1)
-
-            cv2.circle(img, (int(u_top), int(v_top)), 7, (0, 0, 255), -1)
-            cv2.drawMarker(img, (int(u_top), int(v_top)), (255, 255, 255),
-                           markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-            cv2.putText(img, "PICK [SPINE MID]", (int(u_top) - 20, max(20, int(v_top) - 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-
-            title_header = "SAM-REFINED TARGET [SCATTERED]"
-
-        info_lines = [
-            title_header,
-            f"OCR: {best_match['text'][:28]}",
-            f"Match: {best_match['similarity']:.2f}",
-            f"Conf: {best_match['conf']:.2f}",
-            f"Spine Pick: ({u_top:.1f}, {v_top:.1f})",
-            f"Grasp Angle: {pick_angle:.1f} deg",
-            f"Approach Angle: {approach_angle:.1f} deg",
-        ]
-
-        pick_xyz = best_match.get("xyz_pick_camera_frame")
-        if pick_xyz is None:
-            pick_xyz = xyz
-        if pick_xyz is not None:
-            info_lines.append(f"Pick XYZ: ({pick_xyz[0]:.3f}, {pick_xyz[1]:.3f}, {pick_xyz[2]:.3f}) m")
-
-        # Position HUD overlay cleanly in top margin
-        text_x = 35
-        text_y = 45
-        box_w, box_h = 285, 20 * len(info_lines) + 15
-
-        overlay = img.copy()
-        cv2.rectangle(overlay, (text_x - 10, text_y - 25), (text_x + box_w, text_y + box_h - 20), (0, 0, 0), -1)
-        img = cv2.addWeighted(overlay, 0.65, img, 0.35, 0)
-
-        for i, line in enumerate(info_lines):
-            y_pos = text_y + i * 20
-            color = (0, 255, 255) if i == 0 else (0, 255, 0)
-            cv2.putText(img, line, (text_x, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-
-        # Header tag over the target book
-        cv2.putText(img, f"TARGET: {best_match['text'][:20]}", (int(cx) - 45, max(25, int(v_top) - 25)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    cv2.imwrite(output_path, img)
-    print(f"\nSaved visual result to: {output_path}", flush=True)
+    from shared.display_utils import draw_aesthetic_target_overlay
+    res = draw_aesthetic_target_overlay(cv_image, best_match)
 
     try:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        cv2.imwrite(output_path, res)
+        print(f"\nSaved aesthetic visual result to: {output_path}", flush=True)
+
         from datetime import datetime
         runs_dir = Path(output_path).parent / "saved_runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         stem = Path(output_path).stem
         history_path = runs_dir / f"{stem}_{timestamp}.jpg"
-        cv2.imwrite(str(history_path), img)
-        print(f"Stored image copy to: {history_path}", flush=True)
+        cv2.imwrite(str(history_path), res)
     except Exception as e:
-        print(f"Warning storing image history: {e}", flush=True)
+        print(f"Notice saving visual result: {e}", flush=True)
 
+    return res
 
-# =========================================================
-# IMAGE MODE — test on a saved file, no camera/depth needed
-# =========================================================
 
 def find_target_scattered_image(image_path, query_title, conf_threshold=DEFAULT_CONF,
                                  save_visual=True, output_path="result_target_scattered.jpg",
@@ -321,20 +238,29 @@ def find_target_scattered_image(image_path, query_title, conf_threshold=DEFAULT_
             _save_visual_result(cv_image, detections, None, output_path)
         return None
 
+    from shared.sam_refine import is_front_facing_book
+    best["is_front_facing"] = bool(is_front_facing_book(best.get("corners", best.get("obb_corners")), cv_image))
+
     if refine_mode:
         best = _refine_target_with_sam(cv_image, best, refine_mode=refine_mode, pick_location=pick_location, query_title=query_title)
 
     if save_visual:
-        _save_visual_result(cv_image, detections, best, output_path)
+        best["visual_frame"] = _save_visual_result(cv_image, detections, best, output_path)
+
+    pick_2d = best.get("pick_point_2d", best.get("top_edge_center", best.get("center")))
+    best["pick_point_2d"] = pick_2d
+    best["pick_point_px"] = [pick_2d[0], pick_2d[1]]
 
     target_output = {
         "u": best["center"][0],
         "v": best["center"][1],
         "width_px": best["width_px"],
         "height_px": best["height_px"],
-        "top_edge_center_u": best["top_edge_center"][0],
-        "top_edge_center_v": best["top_edge_center"][1],
-        "pick_point_2d": best.get("pick_point_2d", best["top_edge_center"]),
+        "top_edge_center_u": pick_2d[0],
+        "top_edge_center_v": pick_2d[1],
+        "pick_point_2d": pick_2d,
+        "pick_point_px": [pick_2d[0], pick_2d[1]],
+        "visual_frame": best.get("visual_frame"),
         "pick_edge_endpoints": best.get("pick_edge_endpoints"),
         "pick_edge_angle_deg": best.get("pick_edge_angle_deg", best.get("obb_angle")),
         "grasp_approach_angle_deg": best.get("grasp_approach_angle_deg"),
@@ -345,10 +271,12 @@ def find_target_scattered_image(image_path, query_title, conf_threshold=DEFAULT_
         "similarity": best["similarity"],
         "conf": best["conf"],
         "text": best["text"],
+        "title": best.get("title", best.get("text")),
         "corners": best.get("corners", best.get("obb_corners")),
         "obb_corners": best.get("obb_corners", best.get("corners")),
         "mask_contour": best.get("mask_contour"),
         "refine_mode": best.get("refine_mode", refine_mode),
+        "is_front_facing": bool(best.get("is_front_facing", False)),
     }
     from shared.display_utils import print_target_summary
     print_target_summary(target_output)
@@ -431,20 +359,53 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
                 corners=best.get("corners")
             )
 
-            if (xyz_pick is None or xyz_pick[2] > 0.46) and book_depth is not None:
-                print(f"[Scattered] Pick depth was background (>0.46m) or missing. Using robust book depth ({book_depth:.3f}m).", flush=True)
+            if (xyz_pick is None or xyz_pick[2] > 0.65) and book_depth is not None:
+                print(f"[Scattered] Pick depth was background (>0.65m) or missing. Using robust book depth ({book_depth:.3f}m).", flush=True)
                 xyz_pick = deproject_target(
                     depth_frame, color_intrinsics, pick_u, pick_v,
                     reference_depth=book_depth
                 )
 
+        if xyz_pick is None and xyz_center is not None:
+            xyz_pick = xyz_center
+        if xyz_center is None and xyz_pick is not None:
+            xyz_center = xyz_pick
+
+        # Kinematic Reachability Validation & Fallback for Scattered Books:
+        # If the nominal pick point is out of reach of the Dobot arm, search the safe
+        # interior of the book cover for a pick position that can still get the book.
+        is_fallback_reachable = False
+        try:
+            from shared.reachable_pick import find_reachable_scattered_point
+            reach_info = find_reachable_scattered_point(
+                corners_2d=best.get("corners", best.get("obb_corners")),
+                nominal_u=pick_u,
+                nominal_v=pick_v,
+                depth_frame=depth_frame,
+                color_intrinsics=color_intrinsics,
+                book_depth=book_depth,
+                nominal_xyz_cam=xyz_pick
+            )
+            if reach_info is not None and reach_info.get("is_fallback"):
+                xyz_pick = reach_info["pick_xyz_m"]
+                pick_u, pick_v = reach_info["pick_uv"]
+                best["pick_point_2d"] = (pick_u, pick_v)
+                best["top_edge_center"] = (pick_u, pick_v)
+                best["robot_xyz_mm"] = reach_info["pick_rob_mm"]
+                best["pick_note"] = reach_info["reason"]
+                is_fallback_reachable = True
+        except Exception as e:
+            print(f"[Scattered Reachability] Notice during reachability check: {e}", flush=True)
+
         best["xyz_center_camera_frame"] = xyz_center
         best["xyz_pick_camera_frame"] = xyz_pick
         best_xyz = xyz_pick if xyz_pick is not None else xyz_center
         best["xyz_camera_frame"] = best_xyz
+        best["is_fallback_reachable"] = is_fallback_reachable
 
+        best["pick_point_px"] = [pick_u, pick_v]
         if save_visual:
-            _save_visual_result(cv_image, detections, best, output_path, xyz=best_xyz)
+            best["visual_frame"] = _save_visual_result(cv_image, detections, best, output_path, xyz=best_xyz)
 
         target_output = {
             "u": u,
@@ -454,6 +415,11 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
             "top_edge_center_u": pick_u,
             "top_edge_center_v": pick_v,
             "pick_point_2d": best.get("pick_point_2d", (pick_u, pick_v)),
+            "pick_point_px": [pick_u, pick_v],
+            "visual_frame": best.get("visual_frame"),
+            "is_fallback_reachable": best.get("is_fallback_reachable", False),
+            "robot_xyz": best.get("robot_xyz_mm"),
+            "pick_note": best.get("pick_note"),
             "pick_edge_endpoints": best.get("pick_edge_endpoints"),
             "pick_edge_angle_deg": best.get("pick_edge_angle_deg", best.get("obb_angle")),
             "grasp_approach_angle_deg": best.get("grasp_approach_angle_deg"),
@@ -464,6 +430,7 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
             "similarity": best["similarity"],
             "conf": best["conf"],
             "text": best["text"],
+        "title": best.get("title", best.get("text")),
             "xyz_camera_frame": best_xyz,
             "xyz_pick_camera_frame": xyz_pick,
             "xyz_center_camera_frame": xyz_center,
@@ -471,6 +438,7 @@ def find_target_scattered_live(query_title, conf_threshold=DEFAULT_CONF,
             "obb_corners": best.get("obb_corners", best.get("corners")),
             "mask_contour": best.get("mask_contour"),
             "refine_mode": best.get("refine_mode", refine_mode),
+            "is_front_facing": bool(best.get("is_front_facing", False)),
         }
         from shared.display_utils import print_target_summary
         print_target_summary(target_output)

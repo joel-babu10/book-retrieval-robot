@@ -28,109 +28,28 @@ from scattered_pipeline.find_target_scattered import (
 
 
 def _render_mixed_visual_result(cv_image, winner_target, winner_mode, spine_score, scattered_score, output_path):
-    """
-    Renders high-visibility bounding box and comparison overlay for mixed mode.
-    """
-    img = cv_image.copy()
-    img_h, img_w = img.shape[:2]
+    if winner_target is None or cv_image is None:
+        return cv_image
 
-    # Retrieve or reconstruct corners
-    corners = winner_target.get("corners")
-    if corners is None:
-        corners = winner_target.get("obb_corners")
-
-    # Fallback reconstruction if explicit corners were not provided
-    if corners is None and "u" in winner_target and "width_px" in winner_target and "height_px" in winner_target:
-        cx, cy = float(winner_target["u"]), float(winner_target["v"])
-        w, h = float(winner_target["width_px"]), float(winner_target["height_px"])
-        angle = float(winner_target.get("obb_angle", 0.0))
-        rect = ((cx, cy), (w, h), angle)
-        corners = cv2.boxPoints(rect)
-
-    # 1. Translucent SAM Mask Shading & Organic Contour
-    sam_cnt = winner_target.get("mask_contour")
-    if sam_cnt is not None and len(sam_cnt) >= 3:
-        mask_overlay = img.copy()
-        cv2.fillPoly(mask_overlay, [sam_cnt.astype(np.int32)], (0, 242, 254))  # Glowing cyan fill
-        img = cv2.addWeighted(mask_overlay, 0.22, img, 0.78, 0)
-        cv2.drawContours(img, [sam_cnt.astype(np.int32)], -1, (0, 255, 255), 2, cv2.LINE_AA)
-
-    # 2. Geometric Target Bounding Box
-    if corners is not None:
-        pts = np.array(corners, dtype=np.int32).reshape((-1, 1, 2))
-        box_color = (0, 0, 255) if winner_mode == "SPINE" else (0, 255, 0)
-        cv2.polylines(img, [pts], isClosed=True, color=box_color, thickness=4)
-
-    cx, cy = winner_target["u"], winner_target["v"]
-    cv2.drawMarker(img, (int(cx), int(cy)), (255, 0, 0),
-                   markerType=cv2.MARKER_CROSS, markerSize=14, thickness=2)
-
-    # Highlight robot pick edge (grasp edge) and pick point
-    top_u = winner_target.get("top_edge_center_u", cx)
-    top_v = winner_target.get("top_edge_center_v", cy)
-    endpoints = winner_target.get("pick_edge_endpoints")
-    if endpoints and len(endpoints) == 2:
-        p1 = (int(endpoints[0][0]), int(endpoints[0][1]))
-        p2 = (int(endpoints[1][0]), int(endpoints[1][1]))
-        cv2.line(img, p1, p2, (255, 255, 0), 3, cv2.LINE_AA)  # Cyan pick edge
-        cv2.circle(img, p1, 5, (255, 255, 0), -1)
-        cv2.circle(img, p2, 5, (255, 255, 0), -1)
-
-    # Robot pick point marker (red circle with white cross)
-    cv2.circle(img, (int(top_u), int(top_v)), 7, (0, 0, 255), -1)
-    cv2.drawMarker(img, (int(top_u), int(top_v)), (255, 255, 255),
-                   markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
-    cv2.putText(img, "PICK", (int(top_u) - 15, int(top_v) - 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-
-    info_lines = [
-        f"MIXED WINNER: {winner_mode}",
-        f"OCR: {winner_target.get('text', '')[:28]}",
-        f"Match Score: {winner_target.get('similarity', 0.0):.2f}",
-        f"Spine vs Scat: {spine_score:.2f} vs {scattered_score:.2f}",
-        f"Center (u,v): ({cx:.1f}, {cy:.1f})",
-        f"Pick Edge (u,v): ({top_u:.1f}, {top_v:.1f})",
-    ]
-    pick_angle = winner_target.get("pick_edge_angle_deg")
-    if pick_angle is not None:
-        info_lines.append(f"Grasp Angle: {pick_angle:.1f} deg")
-
-    pick_xyz = winner_target.get("xyz_pick_camera_frame")
-    if pick_xyz is None:
-        pick_xyz = winner_target.get("xyz_camera_frame")
-    if pick_xyz is not None:
-        info_lines.append(f"Pick XYZ: ({pick_xyz[0]:.3f}, {pick_xyz[1]:.3f}, {pick_xyz[2]:.3f}) m")
-
-    box_w, box_h = 280, 22 * len(info_lines) + 12
-    text_x = int(cx) + 15
-    text_y = int(cy) - 60
-    text_x = max(5, min(text_x, img_w - box_w - 5))
-    text_y = max(30, min(text_y, img_h - box_h - 5))
-
-    overlay = img.copy()
-    cv2.rectangle(overlay, (text_x - 5, text_y - 20), (text_x + box_w, text_y + box_h - 15), (0, 0, 0), -1)
-    img = cv2.addWeighted(overlay, 0.65, img, 0.35, 0)
-
-    for i, line in enumerate(info_lines):
-        color = (0, 255, 255) if i == 0 else (0, 255, 0)
-        cv2.putText(img, line, (text_x, text_y + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA)
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    cv2.imwrite(output_path, img)
-    print(f"\nSaved visual result to: {output_path}", flush=True)
+    from shared.display_utils import draw_aesthetic_target_overlay
+    res = draw_aesthetic_target_overlay(cv_image, winner_target)
 
     try:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        cv2.imwrite(output_path, res)
+        print(f"\nSaved aesthetic visual result to: {output_path}", flush=True)
+
         from datetime import datetime
         runs_dir = Path(output_path).parent / "saved_runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         stem = Path(output_path).stem
         history_path = runs_dir / f"{stem}_{timestamp}.jpg"
-        cv2.imwrite(str(history_path), img)
-        print(f"Stored image copy to: {history_path}", flush=True)
+        cv2.imwrite(str(history_path), res)
     except Exception as e:
-        print(f"Warning storing image history: {e}", flush=True)
+        print(f"Notice saving visual result: {e}", flush=True)
+
+    return res
 
 
 def _is_flat_desk_target(t):
@@ -369,6 +288,7 @@ def find_target_mixed_live(query_title, camera=None, cv_image=None, depth_frame=
                 winner_target["is_short_edge"] = edge_info["is_short_edge"]
                 winner_target["pick_edge_length_px"] = edge_len
                 winner_target["obb_angle"] = edge_info["pick_edge_angle_deg"]
+                winner_target["is_front_facing"] = bool(edge_info.get("is_front_facing", False))
 
                 center_u, center_v = edge_info["center_2d"]
                 winner_target["u"] = center_u
@@ -482,6 +402,7 @@ def find_target_mixed_image(image_path, query_title, refine_sam=True, save_visua
             winner_target["is_short_edge"] = edge_info["is_short_edge"]
             winner_target["pick_edge_length_px"] = edge_info["pick_edge_length_px"]
             winner_target["obb_angle"] = edge_info["pick_edge_angle_deg"]
+            winner_target["is_front_facing"] = bool(edge_info.get("is_front_facing", False))
 
             center_u, center_v = edge_info["center_2d"]
             winner_target["u"] = center_u
